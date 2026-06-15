@@ -8848,12 +8848,39 @@ class BroadcastFrame(ctk.CTkFrame):
         except Exception:
             pass
 
+        worker_started = threading.Event()
+
+        def finish_quick_start(message: str):
+            self._running = False
+            self._active_op_name = ""
+            try:
+                self.log.append(f"[Быстрый старт] {message}")
+            except Exception:
+                log_to_file("broadcast", f"[Быстрый старт] {message}")
+            try:
+                self.btn_quick_start.configure(state="normal", text="▶ Start")
+            except Exception:
+                pass
+            try:
+                self.btn_stop_current.configure(state="disabled", text="■ Остановить текущий процесс")
+            except Exception:
+                pass
+            try:
+                self.lbl_quick_status.configure(text="Статус: ошибка запуска", text_color="#E74C3C")
+            except Exception:
+                pass
+
+        def check_worker_started():
+            if self._running and not worker_started.is_set():
+                finish_quick_start("[!] Фоновый поток не стартовал за 3 секунды. Нажмите Start ещё раз; если повторится — смотрите data/logs/teleton_broadcast.log.")
+
         def thread():
             log_queue = self.app.log_queue
             _thread_local.log_handler = lambda msg: log_queue.put(("quick_log", msg))
             _thread_local.log_tag = "quick_broadcast"
 
             try:
+                worker_started.set()
                 log_queue.put(("quick_log", "[i] Фоновый поток запущен"))
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
@@ -9022,7 +9049,14 @@ class BroadcastFrame(ctk.CTkFrame):
                 _thread_local.log_handler = None
                 log_queue.put(("quick_done", None))
 
-        threading.Thread(target=thread, daemon=True).start()
+        try:
+            quick_thread = threading.Thread(target=thread, name="QuickBroadcastWorker", daemon=True)
+            self._quick_thread = quick_thread
+            quick_thread.start()
+            self.log.append(f"[Быстрый старт] [i] Фоновый поток создан: alive={quick_thread.is_alive()}")
+            self.after(3000, check_worker_started)
+        except Exception as e:
+            finish_quick_start(f"[-] Не удалось создать фоновый поток: {e}")
 
     def on_show(self):
         self._refresh_accounts()
@@ -9030,26 +9064,33 @@ class BroadcastFrame(ctk.CTkFrame):
 
         # === Диагностика циклических кампаний на старте (чтобы было видно, что происходит) ===
         try:
-            db = Database(self.app.config.db_path)
-            camps = db.list_cycle_campaigns()
-            self._append_log("[Циклическая] [!!!] === СОСТОЯНИЕ ВСЕХ ЦИКЛИЧЕСКИХ РАССЫЛОК НА СТАРТЕ (МОНИТОРИНГ) ===")
-            configured_but_not_running = []
-            for c in camps:
-                cname = c.get("name", "?")
-                en = bool(c.get("enabled"))
-                cid = db.get_or_create_cycle_campaign(cname)
-                tgts = db.get_cycle_targets(cid)
-                accs = db.get_cycle_campaign_account_phones(cid)
-                runner_ok = self._cycle_runner_alive(self._cycle_get_runner(cname))
-                status_line = f"  [i] '{cname}': enabled={en}, целей={len(tgts)}, аккаунтов={len(accs)}, runner={'живой' if runner_ok else 'остановлен'}"
-                self._append_log(status_line)
-                if len(tgts) > 0 and len(accs) > 0 and not runner_ok:
-                    configured_but_not_running.append(cname)
-            self._append_log("[Циклическая] [!!!] === КОНЕЦ ДИАГНОСТИКИ ===")
-            db.close()
+            now = time.monotonic()
+            quick_running = getattr(self, "_running", False) and getattr(self, "_active_op_name", "") == "быстрый старт"
+            last_diag_at = getattr(self, "_cycle_start_diag_at", 0.0)
+            should_log_diag = not quick_running and (now - last_diag_at > 60)
+            if should_log_diag:
+                self._cycle_start_diag_at = now
+                db = Database(self.app.config.db_path)
+                try:
+                    camps = db.list_cycle_campaigns()
+                    configured_but_not_running = []
+                    for c in camps:
+                        cname = c.get("name", "?")
+                        en = bool(c.get("enabled"))
+                        cid = db.get_or_create_cycle_campaign(cname)
+                        tgts = db.get_cycle_targets(cid)
+                        accs = db.get_cycle_campaign_account_phones(cid)
+                        runner_ok = self._cycle_runner_alive(self._cycle_get_runner(cname))
+                        if en or tgts or accs or runner_ok:
+                            status_line = f"[Циклическая] [i] '{cname}': enabled={en}, целей={len(tgts)}, аккаунтов={len(accs)}, runner={'живой' if runner_ok else 'остановлен'}"
+                            self._append_log(status_line)
+                        if len(tgts) > 0 and len(accs) > 0 and not runner_ok:
+                            configured_but_not_running.append(cname)
+                finally:
+                    db.close()
 
-            if configured_but_not_running:
-                self._append_log(f"[Циклическая] [!!!] БУДУ ЗАПУСКАТЬ: {configured_but_not_running}")
+                if configured_but_not_running:
+                    self._append_log(f"[Циклическая] [!] Кампании настроены, но runner остановлен: {configured_but_not_running}")
         except Exception as e:
             self._append_log(f"[Циклическая] [!] Ошибка диагностики кампаний: {e}")
 
