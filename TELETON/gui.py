@@ -3822,7 +3822,12 @@ class TasksFrame(ctk.CTkFrame):
                        hover_color="darkred", command=self._delete_task).pack(side="left", padx=5)
 
         # Таблица
-        self.table = ScrollableTable(self, columns=["ID", "Группа", "Тип", "Источник", "Статус"])
+        self.table = ScrollableTable(
+            self,
+            columns=["ID", "Группа", "Тип", "Источник", "Статус", "Попытки", "Повтор", "Ошибка"],
+            column_weights=[0, 3, 1, 1, 1, 0, 1, 2],
+            column_minsizes=[45, 180, 90, 120, 125, 70, 95, 180],
+        )
         self.table.pack(padx=20 if not embed else 10, pady=10, fill="both", expand=True)
         self.table.set_on_select(self._on_select)
 
@@ -3841,26 +3846,55 @@ class TasksFrame(ctk.CTkFrame):
         db.close()
 
         rows = []
+        highlights = []
         for t in self._tasks:
-            if t.completed:
-                status = "Выполнена"
-            else:
-                st = getattr(t, "status", "pending")
-                if st == "waiting":
-                    ra = getattr(t, "retry_after", "") or ""
-                    status = f"Ожидание {ra[11:16]}" if len(ra) >= 16 else "Ожидание"
-                elif st == "error":
-                    status = "Ошибка"
-                else:
-                    status = "Ожидает"
+            status = self._format_status(t)
+            retry_after = getattr(t, "retry_after", "") or ""
+            retry_short = retry_after[11:16] if len(retry_after) >= 16 else "—"
+            last_error = self._shorten(getattr(t, "last_error", "") or "", 48)
             rows.append((
                 t.id,
                 t.target_group,
                 t.task_type,
                 t.source_group or "—",
                 status,
+                getattr(t, "fail_count", 0) or 0,
+                retry_short,
+                last_error or "—",
             ))
-        self.table.set_data(rows)
+            highlights.append(self._row_highlight(t))
+        self.table.set_data(rows, highlights)
+
+    def _format_status(self, task):
+        if getattr(task, "completed", False):
+            return "Выполнена"
+        status = getattr(task, "status", "pending")
+        if status == "waiting":
+            retry_after = getattr(task, "retry_after", "") or ""
+            if len(retry_after) >= 16:
+                return f"Ожидает до {retry_after[11:16]}"
+            return "Ожидает повтора"
+        if status == "error":
+            return "Ошибка"
+        if status == "done":
+            return "Выполнена"
+        return "Готова"
+
+    def _row_highlight(self, task):
+        if getattr(task, "completed", False) or getattr(task, "status", "") == "done":
+            return ("#DCFCE7", "#17351F")
+        status = getattr(task, "status", "pending")
+        if status == "waiting":
+            return ("#FEF3C7", "#3A2F12")
+        if status == "error":
+            return ("#FEE2E2", "#3A1717")
+        return ("#E0F2FE", "#123040")
+
+    def _shorten(self, text: str, limit: int = 80) -> str:
+        value = " ".join((text or "").split())
+        if len(value) <= limit:
+            return value
+        return value[: max(0, limit - 1)] + "…"
 
     def _on_select(self, index):
         if index < len(self._tasks):
@@ -5553,6 +5587,13 @@ class BroadcastFrame(ctk.CTkFrame):
         self._quick_template_links: list[str] = []
         self._quick_account_phones: list[str] = []
         self._cycle_runtime: dict[str, dict] = {}
+        self._broadcast_status_after_id = None
+        self._broadcast_ui_state = {
+            "state": "idle",
+            "current": "—",
+            "last_success": [],
+            "last_errors": [],
+        }
 
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.pack(padx=20, pady=(12, 2), fill="x")
@@ -5597,6 +5638,8 @@ class BroadcastFrame(ctk.CTkFrame):
         self._build_broadcast_tab()
         self._build_tasks_tab()
         self._build_cycle_tab()
+        self._refresh_broadcast_status_panel()
+        self._schedule_broadcast_status_refresh()
 
         # Ensure helpers for account display and busy tracking are available on this frame
         # (they may have been defined in other frames; delegate to app or provide local)
@@ -5994,6 +6037,46 @@ class BroadcastFrame(ctk.CTkFrame):
                       text_color="gray").pack(padx=10, anchor="w")
         ctk.CTkLabel(tab, text="Список целей редактируется во вкладке «Очередь».",
                      text_color="gray").pack(padx=10, pady=(0, 8), anchor="w")
+
+        status_panel = ctk.CTkFrame(tab, fg_color=("#F8FAFC", "#111827"), corner_radius=8)
+        status_panel.pack(padx=10, pady=(4, 10), fill="x")
+        status_panel.grid_columnconfigure(1, weight=1)
+        status_panel.grid_columnconfigure(3, weight=1)
+
+        ctk.CTkLabel(status_panel, text="Состояние очереди", font=ctk.CTkFont(size=13, weight="bold")).grid(
+            row=0, column=0, padx=10, pady=(8, 3), sticky="w"
+        )
+        self.lbl_broadcast_state = ctk.CTkLabel(status_panel, text="Не запущено", text_color="gray60")
+        self.lbl_broadcast_state.grid(row=0, column=1, padx=8, pady=(8, 3), sticky="w")
+        self.lbl_broadcast_counts = ctk.CTkLabel(status_panel, text="—", text_color="gray60")
+        self.lbl_broadcast_counts.grid(row=0, column=2, columnspan=2, padx=8, pady=(8, 3), sticky="e")
+
+        ctk.CTkLabel(status_panel, text="Текущая:", font=ctk.CTkFont(weight="bold")).grid(
+            row=1, column=0, padx=10, pady=3, sticky="w"
+        )
+        self.lbl_broadcast_current = ctk.CTkLabel(status_panel, text="—", anchor="w")
+        self.lbl_broadcast_current.grid(row=1, column=1, columnspan=3, padx=8, pady=3, sticky="ew")
+
+        ctk.CTkLabel(status_panel, text="Следующая:", font=ctk.CTkFont(weight="bold")).grid(
+            row=2, column=0, padx=10, pady=3, sticky="w"
+        )
+        self.lbl_broadcast_next = ctk.CTkLabel(status_panel, text="—", anchor="w")
+        self.lbl_broadcast_next.grid(row=2, column=1, columnspan=3, padx=8, pady=3, sticky="ew")
+
+        ctk.CTkLabel(status_panel, text="Успешные:", font=ctk.CTkFont(weight="bold")).grid(
+            row=3, column=0, padx=10, pady=3, sticky="w"
+        )
+        self.lbl_broadcast_success = ctk.CTkLabel(status_panel, text="—", anchor="w", text_color=("#166534", "#86EFAC"))
+        self.lbl_broadcast_success.grid(row=3, column=1, columnspan=3, padx=8, pady=3, sticky="ew")
+
+        ctk.CTkLabel(status_panel, text="Ошибки:", font=ctk.CTkFont(weight="bold")).grid(
+            row=4, column=0, padx=10, pady=(3, 8), sticky="w"
+        )
+        self.lbl_broadcast_errors = ctk.CTkLabel(status_panel, text="—", anchor="w", text_color=("#991B1B", "#FCA5A5"))
+        self.lbl_broadcast_errors.grid(row=4, column=1, columnspan=2, padx=8, pady=(3, 8), sticky="ew")
+        ctk.CTkButton(status_panel, text="Обновить", width=95, command=self._refresh_broadcast_status_panel).grid(
+            row=4, column=3, padx=8, pady=(3, 8), sticky="e"
+        )
 
         acc_row = ctk.CTkFrame(tab, fg_color="transparent")
         acc_row.pack(padx=10, pady=(10, 0), anchor="w")
@@ -9713,6 +9796,165 @@ class BroadcastFrame(ctk.CTkFrame):
 
         threading.Thread(target=check_thread, daemon=True).start()
 
+    def _schedule_broadcast_status_refresh(self):
+        try:
+            if not self.winfo_exists():
+                return
+            self._broadcast_status_after_id = self.after(5000, self._broadcast_status_tick)
+        except Exception:
+            self._broadcast_status_after_id = None
+
+    def _broadcast_status_tick(self):
+        self._broadcast_status_after_id = None
+        self._refresh_broadcast_status_panel()
+        self._schedule_broadcast_status_refresh()
+
+    def _refresh_broadcast_status_panel(self):
+        if not hasattr(self, "lbl_broadcast_state"):
+            return
+
+        all_tasks = []
+        ready_tasks = []
+        try:
+            db = Database(self.app.config.db_path)
+            try:
+                all_tasks = [t for t in db.get_all_tasks() if getattr(t, "task_type", "") == "broadcast"]
+                ready_tasks = db.get_pending_tasks(task_type="broadcast")
+            finally:
+                db.close()
+        except Exception as e:
+            self.lbl_broadcast_counts.configure(text=f"Ошибка чтения очереди: {e}")
+            return
+
+        waiting_tasks = [
+            t for t in all_tasks
+            if not getattr(t, "completed", False) and getattr(t, "status", "pending") == "waiting"
+        ]
+        error_tasks = [
+            t for t in all_tasks
+            if getattr(t, "status", "pending") == "error" or bool(getattr(t, "last_error", "") or "")
+        ]
+        done_tasks = [
+            t for t in all_tasks
+            if getattr(t, "completed", False) or getattr(t, "status", "") == "done"
+        ]
+
+        self._set_broadcast_state_label()
+        self.lbl_broadcast_counts.configure(
+            text=(
+                f"Всего: {len(all_tasks)} | готово: {len(ready_tasks)} | "
+                f"ожидание: {len(waiting_tasks)} | ошибки: {len(error_tasks)} | выполнено: {len(done_tasks)}"
+            )
+        )
+
+        current = (self._broadcast_ui_state or {}).get("current") or "—"
+        self.lbl_broadcast_current.configure(text=current)
+
+        next_task = ready_tasks[0] if ready_tasks else None
+        self.lbl_broadcast_next.configure(text=self._task_brief(next_task) if next_task else "Нет готовых задач")
+
+        recent_success = (self._broadcast_ui_state or {}).get("last_success") or []
+        if not recent_success:
+            recent_success = [self._task_brief(t) for t in sorted(done_tasks, key=lambda t: getattr(t, "id", 0) or 0, reverse=True)[:3]]
+        self.lbl_broadcast_success.configure(text=" | ".join(recent_success[:3]) if recent_success else "Пока нет")
+
+        recent_errors = (self._broadcast_ui_state or {}).get("last_errors") or []
+        if not recent_errors:
+            recent_errors = [
+                self._task_error_brief(t)
+                for t in sorted(error_tasks, key=lambda t: getattr(t, "id", 0) or 0, reverse=True)[:3]
+            ]
+        self.lbl_broadcast_errors.configure(text=" | ".join(recent_errors[:3]) if recent_errors else "Пока нет")
+
+    def _set_broadcast_state_label(self):
+        state = (self._broadcast_ui_state or {}).get("state", "idle")
+        if state == "stopping":
+            text = "Останавливается"
+            color = "#F59E0B"
+        elif state == "running":
+            text = "Выполняется"
+            color = "#22C55E"
+        else:
+            text = "Не запущено"
+            color = "gray60"
+        try:
+            self.lbl_broadcast_state.configure(text=text, text_color=color)
+        except Exception:
+            pass
+
+    def _handle_broadcast_progress(self, msg):
+        payload = msg if isinstance(msg, dict) else {}
+        event = payload.get("event")
+        state = self._broadcast_ui_state
+
+        if event == "start":
+            state["state"] = "running"
+            state["current"] = "Подготовка очереди"
+            state["last_success"] = []
+            state["last_errors"] = []
+        elif event == "current":
+            state["state"] = "running"
+            state["current"] = self._progress_brief(payload)
+        elif event == "success":
+            text = self._progress_brief(payload)
+            state["last_success"] = [text] + [x for x in state.get("last_success", []) if x != text]
+        elif event == "error":
+            text = self._progress_brief(payload)
+            err = payload.get("error") or payload.get("status") or ""
+            if err:
+                text = f"{text}: {self._shorten_ui(err, 42)}"
+            state["last_errors"] = [text] + [x for x in state.get("last_errors", []) if x != text]
+        elif event == "stopping":
+            state["state"] = "stopping"
+        elif event == "done":
+            state["state"] = "idle"
+            state["current"] = "—"
+
+        state["last_success"] = state.get("last_success", [])[:3]
+        state["last_errors"] = state.get("last_errors", [])[:3]
+        self._refresh_broadcast_status_panel()
+        try:
+            if hasattr(self, "_tasks_embed"):
+                self._tasks_embed.refresh()
+        except Exception:
+            pass
+
+    def _progress_brief(self, payload: dict) -> str:
+        task_id = payload.get("task_id") or "?"
+        target = payload.get("target") or "—"
+        account = payload.get("account") or "—"
+        index = payload.get("index")
+        total = payload.get("total")
+        order = f"{index}/{total}" if index and total else "—"
+        return self._shorten_ui(f"#{task_id} {target} | {account} | {order}", 120)
+
+    def _task_brief(self, task) -> str:
+        if task is None:
+            return "—"
+        return self._shorten_ui(f"#{getattr(task, 'id', '?')} {getattr(task, 'target_group', '—')}", 120)
+
+    def _task_error_brief(self, task) -> str:
+        base = self._task_brief(task)
+        detail = getattr(task, "last_error", "") or getattr(task, "status", "") or ""
+        if detail:
+            return self._shorten_ui(f"{base}: {detail}", 140)
+        return base
+
+    def _shorten_ui(self, text: str, limit: int = 100) -> str:
+        value = " ".join((text or "").split())
+        if len(value) <= limit:
+            return value
+        return value[: max(0, limit - 1)] + "…"
+
+    def destroy(self):
+        try:
+            after_id = getattr(self, "_broadcast_status_after_id", None)
+            if after_id:
+                self.after_cancel(after_id)
+        except Exception:
+            pass
+        super().destroy()
+
     def _broadcast_preflight(self, selected_account: str, source_mode: str) -> tuple[bool, list[str]]:
         """Понятная проверка перед запуском очереди broadcast-задач."""
         db = Database(self.app.config.db_path)
@@ -9789,6 +10031,7 @@ class BroadcastFrame(ctk.CTkFrame):
         for line in preflight_lines:
             self.log.append(f"[Запуск задач] {line}")
         if not ok_to_start:
+            self._refresh_broadcast_status_panel()
             return
 
         self._stop_event.clear()
@@ -9796,9 +10039,13 @@ class BroadcastFrame(ctk.CTkFrame):
         self._running = True
         self.btn_broadcast.configure(state="disabled", text="Выполняется...")
         self.btn_stop_current.configure(state="normal", text="■ Остановить рассылку")
+        self._handle_broadcast_progress({"event": "start"})
 
         def broadcast_thread():
             log_queue = self.app.log_queue
+            def put_progress(event, **payload):
+                payload["event"] = event
+                log_queue.put(("broadcast_progress", payload))
             _thread_local.log_handler = lambda msg: log_queue.put(("broadcast_log", msg))
             _thread_local.log_tag = "broadcast"
 
@@ -9872,6 +10119,14 @@ class BroadcastFrame(ctk.CTkFrame):
                                         continue
                                     if getattr(task, "status", "pending") in ("waiting", "error", "done"):
                                         continue
+                                    put_progress(
+                                        "current",
+                                        task_id=task.id,
+                                        target=task.target_group,
+                                        account=acc.phone,
+                                        index=task_i + 1,
+                                        total=len(tasks),
+                                    )
 
                                     decision, reason, retry_after = await ensure_chat_access(
                                         sender.client, task.target_group, dry_run=dry_run
@@ -9890,6 +10145,15 @@ class BroadcastFrame(ctk.CTkFrame):
                                                 task.last_error = f"join:{reason}"
                                                 task.fail_count = getattr(task, "fail_count", 0) + 1
                                         print(f"  [!] {task.target_group}: нет доступа ({reason}) — пропуск")
+                                        put_progress(
+                                            "error",
+                                            task_id=task.id,
+                                            target=task.target_group,
+                                            account=acc.phone,
+                                            index=task_i + 1,
+                                            total=len(tasks),
+                                            error=f"join:{reason}",
+                                        )
                                         continue
 
                                     # Источник текста
@@ -9905,6 +10169,15 @@ class BroadcastFrame(ctk.CTkFrame):
                                     if not (raw_msg or "").strip():
                                         print(f"  [!] Задача #{task.id or '?'}: пустой текст — пропуск")
                                         stats["errors"] += 1
+                                        put_progress(
+                                            "error",
+                                            task_id=task.id,
+                                            target=task.target_group,
+                                            account=acc.phone,
+                                            index=task_i + 1,
+                                            total=len(tasks),
+                                            error="empty_text",
+                                        )
                                         continue
                                     # Уникализация
                                     msg = self._apply_unique(raw_msg, _b_unique)
@@ -9977,6 +10250,28 @@ class BroadcastFrame(ctk.CTkFrame):
                                                 task.retry_after = retry_after
                                                 task.last_error = "error"
 
+                                    if status in ("sent", "dry_run"):
+                                        put_progress(
+                                            "success",
+                                            task_id=task.id,
+                                            target=task.target_group,
+                                            account=acc.phone,
+                                            index=task_i + 1,
+                                            total=len(tasks),
+                                            status=status,
+                                        )
+                                    else:
+                                        put_progress(
+                                            "error",
+                                            task_id=task.id,
+                                            target=task.target_group,
+                                            account=acc.phone,
+                                            index=task_i + 1,
+                                            total=len(tasks),
+                                            status=status,
+                                            error=error_detail or raw_status,
+                                        )
+
                                     # Терминальные статусы — выходим без паузы
                                     if status in ("flood_wait", "banned"):
                                         break
@@ -10012,6 +10307,7 @@ class BroadcastFrame(ctk.CTkFrame):
                             f"| задача={current_task_index}/{len(tasks)} | sent={stats['sent']} "
                             f"| dry_run={stats['dry_run']} | errors={stats['errors']}"
                         )
+                        log_queue.put(("broadcast_progress", {"event": "stopping"}))
                     finally:
                         db.close()
 
@@ -10020,6 +10316,7 @@ class BroadcastFrame(ctk.CTkFrame):
                 log_queue.put(("broadcast_log", f"[-] Ошибка: {e}"))
             finally:
                 _thread_local.log_handler = None
+                log_queue.put(("broadcast_progress", {"event": "done"}))
                 self.app.log_queue.put(("broadcast_done", None))
 
         threading.Thread(target=broadcast_thread, daemon=True).start()
@@ -10036,6 +10333,8 @@ class BroadcastFrame(ctk.CTkFrame):
                 self.lbl_quick_status.configure(text=f"Статус: {a} → {t} ({i}/{n})", text_color="#F39C12")
             except Exception:
                 pass
+        elif tag == "broadcast_progress":
+            self._handle_broadcast_progress(msg)
         elif tag == "broadcast_log":
             self.log.append(f"[Запуск задач] {msg}")
         elif tag == "cycle_log":
@@ -10102,6 +10401,8 @@ class BroadcastFrame(ctk.CTkFrame):
             label = self._active_op_name or "текущий процесс"
             self.btn_stop_current.configure(state="disabled", text=f"■ Остановка: {label}")
             self.log.append(f"[~] Остановка запрошена: {label}...")
+            if label == "рассылку":
+                self._handle_broadcast_progress({"event": "stopping"})
         if cycle_active:
             if active_cycle_names:
                 self.log.append(f"[Циклическая] [~] Запрошена остановка кампаний: {', '.join(active_cycle_names)}")
