@@ -180,6 +180,89 @@ def _can_publish_to_group(group: GroupTarget) -> bool:
     return True
 
 
+def _format_wait_until(dt: datetime, now: Optional[datetime] = None) -> str:
+    now = now or _now()
+    seconds = max(0, int((dt - now).total_seconds()))
+    minutes = seconds // 60
+    if minutes >= 60:
+        wait = f"{minutes // 60}ч {minutes % 60}м"
+    elif minutes > 0:
+        wait = f"{minutes}м"
+    else:
+        wait = f"{seconds}с"
+    return f"{dt.strftime('%Y-%m-%d %H:%M')} (ещё {wait})"
+
+
+def _group_block_reason(group: GroupTarget,
+                        now: Optional[datetime] = None) -> str:
+    """Return a short human-readable reason why a group is not publishable."""
+    now = now or _now()
+    if group.status != GROUP_STATUS_ACTIVE:
+        return f"статус {group.status}"
+
+    if group.retry_after:
+        try:
+            retry_dt = datetime.fromisoformat(group.retry_after)
+            if now < retry_dt:
+                return f"retry_after до {_format_wait_until(retry_dt, now)}"
+        except ValueError:
+            pass
+
+    if group.next_allowed_at:
+        try:
+            next_dt = datetime.fromisoformat(group.next_allowed_at)
+            if now < next_dt:
+                return f"интервал группы до {_format_wait_until(next_dt, now)}"
+        except ValueError:
+            pass
+
+    current_hour = now.hour
+    if group.hours_start <= group.hours_end:
+        allowed = group.hours_start <= current_hour <= group.hours_end
+    else:
+        allowed = current_hour >= group.hours_start or current_hour <= group.hours_end
+    if not allowed:
+        return f"вне часов {group.hours_start:02d}:00-{group.hours_end:02d}:59"
+
+    return ""
+
+
+def _blocked_groups_summary(groups: list[GroupTarget],
+                            now: Optional[datetime] = None,
+                            limit: int = 3) -> str:
+    now = now or _now()
+    samples: list[str] = []
+    counts: dict[str, int] = {}
+    for group in groups:
+        reason = _group_block_reason(group, now)
+        if not reason:
+            continue
+        key = reason.split(" до ", 1)[0]
+        counts[key] = counts.get(key, 0) + 1
+        if len(samples) < limit:
+            samples.append(f"{group.link}: {reason}")
+
+    parts = []
+    if counts:
+        parts.append(", ".join(f"{name}: {count}" for name, count in counts.items()))
+    if samples:
+        parts.append("примеры: " + "; ".join(samples))
+    return " | ".join(parts)
+
+
+def _blocked_groups_signature(groups: list[GroupTarget],
+                              now: Optional[datetime] = None) -> str:
+    now = now or _now()
+    counts: dict[str, int] = {}
+    for group in groups:
+        reason = _group_block_reason(group, now)
+        if not reason:
+            continue
+        key = reason.split(" до ", 1)[0]
+        counts[key] = counts.get(key, 0) + 1
+    return ";".join(f"{name}:{counts[name]}" for name in sorted(counts))
+
+
 def _can_publish_globally(pub_count_today: int,
                            next_pub_allowed_at: Optional[datetime],
                            settings: SchedulerSettings) -> bool:
@@ -247,6 +330,9 @@ class AdsScheduler:
         self._CONNECT_TIMEOUT_SECONDS = 30.0
         self._AUTH_TIMEOUT_SECONDS = 20.0
         self._DISCONNECT_TIMEOUT_SECONDS = 10.0
+        self._IDLE_GUI_LOG_INTERVAL_SECONDS = 300
+        self._last_idle_gui_log_at: Optional[datetime] = None
+        self._last_idle_gui_log_signature = ""
 
     # ─── Управление ──────────────────────────────────────────────────────────
 
@@ -281,6 +367,19 @@ class AdsScheduler:
     @property
     def is_alive(self) -> bool:
         return bool(self._thread and self._thread.is_alive())
+
+    def _log_idle(self, message: str, signature: Optional[str] = None):
+        log_to_file("ads", message)
+        signature = signature or message
+        now = _now()
+        if (
+            signature != self._last_idle_gui_log_signature
+            or self._last_idle_gui_log_at is None
+            or (now - self._last_idle_gui_log_at).total_seconds() >= self._IDLE_GUI_LOG_INTERVAL_SECONDS
+        ):
+            self.log_cb(message)
+            self._last_idle_gui_log_signature = signature
+            self._last_idle_gui_log_at = now
 
     # ─── Внутренний цикл ─────────────────────────────────────────────────────
 
@@ -400,15 +499,19 @@ class AdsScheduler:
             pub_count_today = db.count_publications_today(self.account_phone)
 
             if not ads:
-                log_to_file("ads",
-                            f"[~] tick {self.account_phone}: нет активных объявлений "
-                            f"(всего ads=0)")
+                self._log_idle(
+                    f"[~] tick {self.account_phone}: нет активных объявлений "
+                    f"(всего ads=0)",
+                    signature="no-active-ads",
+                )
                 return
 
             if not my_ads:
-                log_to_file("ads",
-                            f"[~] tick {self.account_phone}: нет объявлений для этого "
-                            f"аккаунта (есть {len(ads)} ads, но account_phone не совпадает)")
+                self._log_idle(
+                    f"[~] tick {self.account_phone}: нет объявлений для этого "
+                    f"аккаунта (есть {len(ads)} ads, но account_phone не совпадает)",
+                    signature=f"no-account-ads:{len(ads)}",
+                )
                 return
 
             # Глобальная проверка лимитов
@@ -422,13 +525,17 @@ class AdsScheduler:
                     secs_left = max(0, int((self._next_pub_allowed_at -
                                              datetime.now()).total_seconds()))
                     reason = f"общий интервал ещё {secs_left}с"
-                log_to_file("ads",
-                            f"[~] tick {self.account_phone}: глобально нельзя — {reason}")
+                self._log_idle(
+                    f"[~] tick {self.account_phone}: глобально нельзя — {reason}",
+                    signature=("global-daily-limit" if pub_count_today >= settings.daily_publication_limit
+                               else "global-interval"),
+                )
                 return
 
             # Ищем следующую пару (объявление, группа) для публикации.
             ready_groups = 0
             total_groups = 0
+            blocked_groups: list[GroupTarget] = []
             for ad in my_ads:
                 groups = db.get_groups_for_ad(ad.id)
                 total_groups += len(groups)
@@ -441,12 +548,19 @@ class AdsScheduler:
                                     f"'{ad.title}' → {group.link}")
                         await self._publish_one(db, ad, group, settings)
                         return  # Один тик = одна публикация
+                    blocked_groups.append(group)
 
             # Если дошли сюда — ни одна группа не готова
-            log_to_file("ads",
-                        f"[~] tick {self.account_phone}: ни одна группа не готова "
-                        f"(ads={len(my_ads)}, groups_total={total_groups}, "
-                        f"ready=0, posted_today={pub_count_today}/{settings.daily_publication_limit})")
+            summary = _blocked_groups_summary(blocked_groups)
+            signature = _blocked_groups_signature(blocked_groups)
+            details = f" | {summary}" if summary else ""
+            self._log_idle(
+                f"[~] tick {self.account_phone}: ни одна группа не готова "
+                f"(ads={len(my_ads)}, groups_total={total_groups}, "
+                f"ready=0, posted_today={pub_count_today}/{settings.daily_publication_limit})"
+                f"{details}",
+                signature=f"no-ready:{len(my_ads)}:{total_groups}:{signature}",
+            )
 
         finally:
             db.close()

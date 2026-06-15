@@ -23,7 +23,9 @@ from ads_models import (
 )
 from ads_scheduler import (
     _random_interval_sec, _random_group_interval_sec,
-    _can_publish_to_group, _can_publish_globally, clamp_settings,
+    _can_publish_to_group, _can_publish_globally,
+    _group_block_reason, _blocked_groups_summary,
+    _blocked_groups_signature, clamp_settings,
     HARD_MIN_PUBLICATION_INTERVAL_SEC, HARD_MIN_GROUP_INTERVAL_SEC,
     HARD_MAX_DAILY_PUBLICATIONS,
 )
@@ -181,6 +183,47 @@ class TestCanPublishToGroup:
     def test_invalid_next_allowed_at_ignored(self):
         g = self._active_group(next_allowed_at="also-garbage")
         assert _can_publish_to_group(g) is True
+
+
+class TestGroupBlockDiagnostics:
+    def _active_group(self, **overrides):
+        base = dict(
+            id=1, link="@g", interval_minutes=60, hours_start=0, hours_end=23,
+            status=GROUP_STATUS_ACTIVE, next_allowed_at="", retry_after="",
+        )
+        base.update(overrides)
+        return GroupTarget(**base)
+
+    def test_retry_after_reason_includes_wait_until(self):
+        now = datetime(2026, 6, 15, 18, 0, 0)
+        future = datetime(2026, 6, 15, 18, 30, 0).isoformat()
+        reason = _group_block_reason(
+            self._active_group(retry_after=future),
+            now=now,
+        )
+        assert "retry_after" in reason
+        assert "2026-06-15 18:30" in reason
+        assert "30м" in reason
+
+    def test_summary_lists_reason_counts_and_examples(self):
+        now = datetime(2026, 6, 15, 18, 0, 0)
+        groups = [
+            self._active_group(link="@slow", retry_after=datetime(2026, 6, 15, 18, 5, 0).isoformat()),
+            self._active_group(link="@paused", status=GROUP_STATUS_PAUSED),
+        ]
+        summary = _blocked_groups_summary(groups, now=now)
+        assert "retry_after: 1" in summary
+        assert "статус active" not in summary
+        assert "@slow: retry_after" in summary
+        assert "@paused: статус" in summary
+
+    def test_signature_ignores_changing_countdown_text(self):
+        first_now = datetime(2026, 6, 15, 18, 0, 0)
+        second_now = datetime(2026, 6, 15, 18, 1, 0)
+        groups = [
+            self._active_group(link="@slow", retry_after=datetime(2026, 6, 15, 18, 5, 0).isoformat()),
+        ]
+        assert _blocked_groups_signature(groups, now=first_now) == _blocked_groups_signature(groups, now=second_now)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
