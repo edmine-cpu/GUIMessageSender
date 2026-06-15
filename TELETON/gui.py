@@ -8854,7 +8854,9 @@ class BroadcastFrame(ctk.CTkFrame):
             _thread_local.log_tag = "quick_broadcast"
 
             try:
+                log_queue.put(("quick_log", "[i] Фоновый поток запущен"))
                 loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
 
                 async def do():
                     from sender import TelegramSender
@@ -8863,12 +8865,14 @@ class BroadcastFrame(ctk.CTkFrame):
                     from parser import ensure_chat_access
 
                     cfg = self.app.config
+                    log_queue.put(("quick_log", "[i] Загружаю настройки и лимиты"))
                     db2 = Database(cfg.db_path)
                     _adsdb = AdsDB(cfg.db_path)
                     try:
                         _settings = _adsdb.load_scheduler_settings()
                     finally:
                         _adsdb.close()
+                    log_queue.put(("quick_log", f"[i] Настройки загружены, аккаунтов={len(accounts)}, целей={len(targets)}"))
 
                     try:
                         _saved_texts: dict = {}
@@ -9012,7 +9016,7 @@ class BroadcastFrame(ctk.CTkFrame):
                         db2.close()
 
                 _run_loop(loop, do())
-            except Exception as e:
+            except BaseException as e:
                 log_queue.put(("quick_log", f"[-] Ошибка: {e}"))
             finally:
                 _thread_local.log_handler = None
