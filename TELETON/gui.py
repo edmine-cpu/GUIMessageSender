@@ -9,14 +9,23 @@ import sqlite3
 import builtins
 import traceback
 import re
-from datetime import datetime, date, timedelta
+import csv
+import random
+import tempfile
+import zipfile
+from datetime import datetime, date, timedelta, timezone
 import time
 import asyncio
 
 # Локальные модули проекта (должны быть в той же папке)
+import account_manager
+import autoreply
+import channel_commenter
 from config import Config
 from database import Database
-from models import Account, SendLog, ACCOUNT_STATUS_ACTIVE, ACCOUNT_STATUS_NEEDS_REAUTH, ACCOUNT_STATUS_BANNED, ACCOUNT_STATUS_NETWORK_ISSUE
+from models import Account, Task, SendLog, ACCOUNT_STATUS_ACTIVE, ACCOUNT_STATUS_NEEDS_REAUTH, ACCOUNT_STATUS_BANNED, ACCOUNT_STATUS_NETWORK_ISSUE
+
+HELP_TEXTS = {}
 
 try:
     from file_logger import log_exception

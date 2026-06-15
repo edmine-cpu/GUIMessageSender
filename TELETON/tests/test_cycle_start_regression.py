@@ -100,6 +100,28 @@ def test_gui_imports_sendlog_for_runtime_logging():
     assert "SendLog" in imported
 
 
+def test_gui_imports_cycle_runtime_dependencies():
+    src = _load_gui_source()
+    tree = ast.parse(src)
+    imported_modules = {
+        alias.asname or alias.name.split(".", 1)[0]
+        for node in tree.body
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+    imported_from = {
+        alias.name
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+    }
+
+    assert "random" in imported_modules
+    assert "timezone" in imported_from
+    assert "Task" in imported_from
+    assert "HELP_TEXTS = {}" in src
+
+
 def test_cycle_has_usable_config_is_pure_and_top_level():
     """The non-UI guard that was part of fixing accs==0 for 'Все активные' campaigns."""
     fn = _find_top_level_function(_load_gui_source(), "_cycle_has_usable_config")
