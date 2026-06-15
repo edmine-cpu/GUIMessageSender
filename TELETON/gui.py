@@ -8890,6 +8890,7 @@ class BroadcastFrame(ctk.CTkFrame):
                                 account=acc.phone,
                                 progress="до подключения",
                             )
+                            log_queue.put(("quick_log", f"[~] Аккаунт {acc_i + 1}/{len(accounts)} {acc.phone}: подключаюсь..."))
                             sender = TelegramSender(acc, cfg, db2)
                             connected = await _quick_wait(
                                 sender.connect(),
@@ -8897,7 +8898,9 @@ class BroadcastFrame(ctk.CTkFrame):
                                 30,
                             )
                             if not connected:
+                                log_queue.put(("quick_log", f"[!] {acc.phone}: не подключился, аккаунт пропущен"))
                                 continue
+                            log_queue.put(("quick_log", f"[+] {acc.phone}: подключён"))
                             try:
                                 for i, target in enumerate(targets, start=1):
                                     _raise_if_stop_requested(
