@@ -105,6 +105,17 @@ def _parse_until_datetime(error_text: str) -> Optional[str]:
     return None
 
 
+def _message_id_or_none(msg) -> Optional[int]:
+    """Telethon should return a Message, but defensive handling keeps scheduler alive."""
+    try:
+        message_id = getattr(msg, "id", None)
+        if message_id is None:
+            return None
+        return int(message_id)
+    except Exception:
+        return None
+
+
 async def publish_to_group(
     client,
     group: GroupTarget,
@@ -155,9 +166,17 @@ async def publish_to_group(
                 timeout=30.0,
             )
 
+        message_id = _message_id_or_none(msg)
+        if message_id is None:
+            return PublicationResult(
+                status=PUB_STATUS_ERROR,
+                error_text="Telegram returned no message id after send",
+                retry_after=_retry_after_hours(1),
+            )
+
         return PublicationResult(
             status=PUB_STATUS_OK,
-            message_id=msg.id,
+            message_id=message_id,
         )
 
     except SlowModeWaitError as e:
