@@ -201,7 +201,7 @@ class TestGroupBlockDiagnostics:
             self._active_group(retry_after=future),
             now=now,
         )
-        assert "retry_after" in reason
+        assert "отложено Telegram" in reason
         assert "2026-06-15 18:30" in reason
         assert "30м" in reason
 
@@ -212,10 +212,33 @@ class TestGroupBlockDiagnostics:
             self._active_group(link="@paused", status=GROUP_STATUS_PAUSED),
         ]
         summary = _blocked_groups_summary(groups, now=now)
-        assert "retry_after: 1" in summary
+        assert "отложено Telegram: 1" in summary
         assert "статус active" not in summary
-        assert "@slow: retry_after" in summary
+        assert "@slow: отложено Telegram" in summary
         assert "@paused: статус" in summary
+
+    def test_join_retry_after_reason_is_not_raw_retry_after(self):
+        now = datetime(2026, 6, 15, 18, 0, 0)
+        future = datetime(2026, 6, 15, 19, 0, 0).isoformat()
+        reason = _group_block_reason(
+            self._active_group(
+                join_status="not_member",
+                retry_after=future,
+                last_error="join:error",
+            ),
+            now=now,
+        )
+        assert "нет доступа/не вступили" in reason
+        assert "retry_after" not in reason
+
+    def test_long_retry_after_reason_hints_ban(self):
+        now = datetime(2026, 6, 15, 18, 0, 0)
+        future = datetime(2026, 7, 15, 18, 0, 0).isoformat()
+        reason = _group_block_reason(
+            self._active_group(retry_after=future),
+            now=now,
+        )
+        assert "бан/долгая блокировка" in reason
 
     def test_signature_ignores_changing_countdown_text(self):
         first_now = datetime(2026, 6, 15, 18, 0, 0)

@@ -193,6 +193,30 @@ def _format_wait_until(dt: datetime, now: Optional[datetime] = None) -> str:
     return f"{dt.strftime('%Y-%m-%d %H:%M')} (ещё {wait})"
 
 
+def _retry_after_label(group: GroupTarget, retry_dt: datetime,
+                       now: datetime) -> str:
+    error = (group.last_error or "").strip()
+    error_l = error.lower()
+    seconds = max(0, int((retry_dt - now).total_seconds()))
+
+    if "slowmode" in error_l or "slow_mode" in error_l:
+        label = "slow mode"
+    elif error_l.startswith("join:") or group.join_status == "not_member":
+        label = "нет доступа/не вступили"
+    elif "banned" in error_l or seconds >= 20 * 24 * 3600:
+        label = "бан/долгая блокировка"
+    elif "forbidden" in error_l or seconds >= 6 * 24 * 3600:
+        label = "запрет отправки"
+    elif error:
+        label = "временная ошибка"
+    else:
+        label = "отложено Telegram"
+
+    if error:
+        return f"{label} ({error[:80]})"
+    return label
+
+
 def _group_block_reason(group: GroupTarget,
                         now: Optional[datetime] = None) -> str:
     """Return a short human-readable reason why a group is not publishable."""
@@ -204,7 +228,8 @@ def _group_block_reason(group: GroupTarget,
         try:
             retry_dt = datetime.fromisoformat(group.retry_after)
             if now < retry_dt:
-                return f"retry_after до {_format_wait_until(retry_dt, now)}"
+                label = _retry_after_label(group, retry_dt, now)
+                return f"{label} до {_format_wait_until(retry_dt, now)}"
         except ValueError:
             pass
 
@@ -497,6 +522,7 @@ class AdsScheduler:
             my_ads = [a for a in ads
                       if a.account_phone == self.account_phone]
             pub_count_today = db.count_publications_today(self.account_phone)
+            all_groups_count = len(db.get_all_groups())
 
             if not ads:
                 self._log_idle(
@@ -556,10 +582,10 @@ class AdsScheduler:
             details = f" | {summary}" if summary else ""
             self._log_idle(
                 f"[~] tick {self.account_phone}: ни одна группа не готова "
-                f"(ads={len(my_ads)}, groups_total={total_groups}, "
+                f"(ads={len(my_ads)}, linked_groups={total_groups}/{all_groups_count}, "
                 f"ready=0, posted_today={pub_count_today}/{settings.daily_publication_limit})"
                 f"{details}",
-                signature=f"no-ready:{len(my_ads)}:{total_groups}:{signature}",
+                signature=f"no-ready:{len(my_ads)}:{total_groups}:{all_groups_count}:{signature}",
             )
 
         finally:
