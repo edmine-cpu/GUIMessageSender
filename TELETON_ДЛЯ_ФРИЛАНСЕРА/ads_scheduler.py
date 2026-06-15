@@ -243,6 +243,7 @@ class AdsScheduler:
         # Переиспользуемый клиент. Создаётся лениво при первой публикации,
         # переиспользуется между тиками, дисконнектится при stop().
         self._client = None
+        self._session_lock = None
         self._CONNECT_TIMEOUT_SECONDS = 30.0
         self._AUTH_TIMEOUT_SECONDS = 20.0
         self._DISCONNECT_TIMEOUT_SECONDS = 10.0
@@ -251,11 +252,13 @@ class AdsScheduler:
 
     def start(self):
         """Запустить планировщик в фоновом потоке."""
-        if self._running:
+        if self.is_alive:
             return
+        if self._running and self._thread and not self._thread.is_alive():
+            self._running = False
         self._running = True
         self._thread = threading.Thread(
-            target=self._run, daemon=True, name="AdsScheduler")
+            target=self._run, daemon=True, name=f"AdsScheduler:{self.account_phone}")
         self._thread.start()
         self.log_cb("[+] Планировщик запущен")
 
@@ -264,11 +267,20 @@ class AdsScheduler:
         self._running = False
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=5)
-        self.log_cb("[~] Планировщик остановлен")
+        stopped = not (self._thread and self._thread.is_alive())
+        if stopped:
+            self.log_cb("[~] Планировщик остановлен")
+        else:
+            self.log_cb("[!] Планировщик не остановился за timeout")
+        return stopped
 
     @property
     def is_running(self) -> bool:
-        return self._running
+        return bool(self._running and self._thread and self._thread.is_alive())
+
+    @property
+    def is_alive(self) -> bool:
+        return bool(self._thread and self._thread.is_alive())
 
     # ─── Внутренний цикл ─────────────────────────────────────────────────────
 
@@ -279,12 +291,14 @@ class AdsScheduler:
         try:
             self._loop.run_until_complete(self._loop_async())
         finally:
+            self._running = False
             # Дренируем pending tasks (Python 3.12+ требует)
             pending = asyncio.all_tasks(self._loop)
             if pending:
                 self._loop.run_until_complete(
                     asyncio.gather(*pending, return_exceptions=True))
             self._loop.close()
+            self._loop = None
 
     async def _loop_async(self):
         """Async цикл — вызывает tick() каждые tick_interval секунд."""
@@ -318,8 +332,20 @@ class AdsScheduler:
             # Клиент есть, но отключён — дисконнектим и пересоздаём
             await self._disconnect_client()
 
-        # Создаём нового
+        # Создаём нового. Ads bypasses TelegramSender.connect(), поэтому берём
+        # общий per-account lock здесь, до создания/подключения raw client.
+        client = None
         try:
+            if self._session_lock is None:
+                try:
+                    from sender import TelegramSender
+                    self._session_lock = TelegramSender.try_acquire_account_session(self.account_phone)
+                except Exception as e:
+                    self.log_cb(f"[!] Не удалось получить lock аккаунта {self.account_phone}: {e}")
+                    return None
+                if self._session_lock is None:
+                    self.log_cb(f"[!] Аккаунт занят другим процессом: {self.account_phone}")
+                    return None
             client = self.client_factory()
             await asyncio.wait_for(client.connect(), timeout=self._CONNECT_TIMEOUT_SECONDS)
             if not await asyncio.wait_for(client.is_user_authorized(), timeout=self._AUTH_TIMEOUT_SECONDS):
@@ -328,21 +354,39 @@ class AdsScheduler:
                     await asyncio.wait_for(client.disconnect(), timeout=self._DISCONNECT_TIMEOUT_SECONDS)
                 except Exception:
                     pass
+                self._release_session_lock()
                 return None
             self._client = client
             return client
         except Exception as e:
             self.log_cb(f"[-] Не удалось подключить клиент {self.account_phone}: {e}")
+            if client is not None:
+                try:
+                    await asyncio.wait_for(client.disconnect(), timeout=self._DISCONNECT_TIMEOUT_SECONDS)
+                except Exception:
+                    pass
+            self._release_session_lock()
             return None
 
+    def _release_session_lock(self):
+        if self._session_lock is None:
+            return
+        try:
+            from sender import TelegramSender
+            TelegramSender.release_account_session(self._session_lock)
+        except Exception:
+            pass
+        self._session_lock = None
+
     async def _disconnect_client(self):
-        """Отключить клиент если он подключён."""
+        """Отключить клиент если он подключён и освободить account lock."""
         if self._client is not None:
             try:
                 await asyncio.wait_for(self._client.disconnect(), timeout=self._DISCONNECT_TIMEOUT_SECONDS)
             except Exception:
                 pass
             self._client = None
+        self._release_session_lock()
 
     async def _tick(self):
         """Один тик планировщика: найти и выполнить следующую публикацию."""

@@ -65,23 +65,36 @@ class TelegramSender:
                 cls._account_locks[key] = lock
             return lock
 
+    @classmethod
+    def try_acquire_account_session(cls, phone: str):
+        """Try to reserve a Telegram session for any in-app subsystem."""
+        lock = cls._get_account_lock(phone)
+        if lock.acquire(blocking=False):
+            return lock
+        return None
+
+    @classmethod
+    def release_account_session(cls, lock):
+        if lock is None:
+            return
+        try:
+            lock.release()
+        except Exception:
+            pass
+
     def _try_acquire_session_lock(self) -> bool:
         if self._session_lock_acquired:
             return True
-        lock = self._get_account_lock(self.account.phone)
-        ok = lock.acquire(blocking=False)
+        lock = self.try_acquire_account_session(self.account.phone)
         self._session_lock = lock
-        self._session_lock_acquired = bool(ok)
-        if not ok:
+        self._session_lock_acquired = lock is not None
+        if lock is None:
             print(f"[!] Аккаунт занят другим процессом внутри приложения: {self.account.phone}")
-        return ok
+        return self._session_lock_acquired
 
     def _release_session_lock(self):
         if self._session_lock and self._session_lock_acquired:
-            try:
-                self._session_lock.release()
-            except Exception:
-                pass
+            self.release_account_session(self._session_lock)
         self._session_lock = None
         self._session_lock_acquired = False
 

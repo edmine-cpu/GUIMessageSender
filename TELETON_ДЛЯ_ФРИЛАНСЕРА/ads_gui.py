@@ -35,6 +35,44 @@ _ADS_SCHEDULERS_GUARD = threading.Lock()
 _ADS_RUNNING_SCHEDULERS: dict[str, AdsScheduler] = {}
 
 
+def _ads_scheduler_alive(scheduler: AdsScheduler) -> bool:
+    try:
+        return bool(scheduler.is_alive)
+    except Exception:
+        return False
+
+
+def _prune_ads_schedulers_locked():
+    for phone, scheduler in list(_ADS_RUNNING_SCHEDULERS.items()):
+        if not _ads_scheduler_alive(scheduler):
+            _ADS_RUNNING_SCHEDULERS.pop(phone, None)
+
+
+def stop_all_ads_schedulers(log_cb=None) -> int:
+    """Stop every ads scheduler registered by any Ads UI tab."""
+    with _ADS_SCHEDULERS_GUARD:
+        _prune_ads_schedulers_locked()
+        schedulers = list(_ADS_RUNNING_SCHEDULERS.items())
+
+    stopped = 0
+    for phone, scheduler in schedulers:
+        try:
+            did_stop = scheduler.stop()
+            if did_stop:
+                stopped += 1
+                with _ADS_SCHEDULERS_GUARD:
+                    if _ADS_RUNNING_SCHEDULERS.get(phone) is scheduler:
+                        _ADS_RUNNING_SCHEDULERS.pop(phone, None)
+                if log_cb:
+                    log_cb(f"[ads] остановлен планировщик {phone}")
+            elif log_cb:
+                log_cb(f"[ads] планировщик {phone} ещё останавливается")
+        except Exception as e:
+            if log_cb:
+                log_cb(f"[ads] ошибка остановки {phone}: {e}")
+    return stopped
+
+
 # Импортируем виджеты из gui.py — они уже загружены в рантайме
 def _get_gui_widgets():
     """Получить ScrollableTable и LogFrame из gui модуля."""
@@ -1285,6 +1323,8 @@ class SchedulerTab(ctk.CTkFrame):
     def _start(self):
         if self._scheduler and self._scheduler.is_running:
             return
+        with _ADS_SCHEDULERS_GUARD:
+            _prune_ads_schedulers_locked()
 
         from database import Database
         main_db = Database(self.app.config.db_path)
@@ -1331,15 +1371,29 @@ class SchedulerTab(ctk.CTkFrame):
         self.btn_stop.configure(state="normal")
 
     def _stop(self):
-        if self._scheduler:
+        scheduler = self._scheduler
+        if scheduler is None:
             with _ADS_SCHEDULERS_GUARD:
-                if _ADS_RUNNING_SCHEDULERS.get(self._scheduler.account_phone) is self._scheduler:
-                    _ADS_RUNNING_SCHEDULERS.pop(self._scheduler.account_phone, None)
-            self._scheduler.stop()
-            self._scheduler = None
-        self.lbl_status.configure(text="⏹ Остановлен", text_color="gray60")
-        self.btn_start.configure(state="normal")
-        self.btn_stop.configure(state="disabled")
+                _prune_ads_schedulers_locked()
+                if len(_ADS_RUNNING_SCHEDULERS) == 1:
+                    scheduler = next(iter(_ADS_RUNNING_SCHEDULERS.values()))
+        stopped = True
+        if scheduler:
+            stopped = scheduler.stop()
+            if stopped:
+                with _ADS_SCHEDULERS_GUARD:
+                    if _ADS_RUNNING_SCHEDULERS.get(scheduler.account_phone) is scheduler:
+                        _ADS_RUNNING_SCHEDULERS.pop(scheduler.account_phone, None)
+                if self._scheduler is scheduler:
+                    self._scheduler = None
+        if stopped:
+            self.lbl_status.configure(text="⏹ Остановлен", text_color="gray60")
+            self.btn_start.configure(state="normal")
+            self.btn_stop.configure(state="disabled")
+        else:
+            self.lbl_status.configure(text="⏳ Останавливается", text_color="orange")
+            self.btn_start.configure(state="disabled")
+            self.btn_stop.configure(state="normal")
 
 
 # ─── Вкладка: История ────────────────────────────────────────────────────────
@@ -1864,6 +1918,7 @@ class QuickLaunchTab(ctk.CTkFrame):
 
         started = 0
         with _ADS_SCHEDULERS_GUARD:
+            _prune_ads_schedulers_locked()
             for p in phones:
                 if p in _ADS_RUNNING_SCHEDULERS:
                     self.log.append(f"[!] Планировщик уже запущен для аккаунта {p}")
@@ -1903,21 +1958,36 @@ class QuickLaunchTab(ctk.CTkFrame):
             self.log.append("[!] Не удалось запустить ни одного планировщика")
 
     def _stop(self):
-        if not self._schedulers:
-            return
         with _ADS_SCHEDULERS_GUARD:
-            for p, sch in list(self._schedulers.items()):
-                try:
-                    sch.stop()
-                except Exception:
-                    pass
-                if _ADS_RUNNING_SCHEDULERS.get(p) is sch:
-                    _ADS_RUNNING_SCHEDULERS.pop(p, None)
-            self._schedulers.clear()
+            _prune_ads_schedulers_locked()
+            schedulers = dict(self._schedulers)
+            if not schedulers:
+                schedulers = dict(_ADS_RUNNING_SCHEDULERS)
+        if not schedulers:
+            return
 
-        self.btn_start.configure(state="normal")
-        self.btn_stop.configure(state="disabled")
-        self.lbl_status.configure(text="Статус: остановлен", text_color="gray70")
+        still_running = {}
+        for p, sch in schedulers.items():
+            try:
+                stopped = sch.stop()
+            except Exception:
+                stopped = False
+            if stopped:
+                with _ADS_SCHEDULERS_GUARD:
+                    if _ADS_RUNNING_SCHEDULERS.get(p) is sch:
+                        _ADS_RUNNING_SCHEDULERS.pop(p, None)
+            else:
+                still_running[p] = sch
+
+        self._schedulers = still_running
+        if still_running:
+            self.btn_start.configure(state="disabled")
+            self.btn_stop.configure(state="normal")
+            self.lbl_status.configure(text=f"Статус: останавливается ({len(still_running)})", text_color="orange")
+        else:
+            self.btn_start.configure(state="normal")
+            self.btn_stop.configure(state="disabled")
+            self.lbl_status.configure(text="Статус: остановлен", text_color="gray70")
 
 
 # ─── Главный фрейм ───────────────────────────────────────────────────────────

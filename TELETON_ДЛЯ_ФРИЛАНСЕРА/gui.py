@@ -5709,7 +5709,16 @@ class BroadcastFrame(ctk.CTkFrame):
         except Exception:
             pass
 
-        # 4. Дополнительно: если есть btn_stop_current — нажмём его логику (если метод есть)
+        # 4. Остановить ads-планировщики из отдельного реестра ads_gui.py
+        try:
+            from ads_gui import stop_all_ads_schedulers
+            ads_stopped = stop_all_ads_schedulers(self._append_log)
+            if ads_stopped:
+                stopped.append(f"ads scheduler ({ads_stopped})")
+        except Exception as e:
+            self._append_log(f"[!] Ads scheduler stop: {e}")
+
+        # 5. Дополнительно: если есть btn_stop_current — нажмём его логику (если метод есть)
         try:
             if hasattr(self, "_stop_current_process"):
                 self._stop_current_process()
@@ -5717,7 +5726,7 @@ class BroadcastFrame(ctk.CTkFrame):
         except Exception:
             pass
 
-        # 5. Сброс флага и обновление кнопки стопа
+        # 6. Сброс флага и обновление кнопки стопа
         try:
             self._running = False
             if hasattr(self, "btn_stop_current"):
@@ -8358,8 +8367,8 @@ class BroadcastFrame(ctk.CTkFrame):
                 self.after(2000, lambda name=running_campaign_name, rid=run_id: self._cycle_verify_worker_start(name, rid))
             except Exception:
                 pass
-                self._cycle_refresh_cycle_buttons()
-                launched_ok = True
+            self._cycle_refresh_cycle_buttons()
+            launched_ok = True
         except Exception as e:
             self._append_log(f"[Циклическая] [!] Ошибка регистрации/старта воркера: {e}")
             # Сброс UI чтобы не остаться в ложном "запущен" состоянии (P0 регрессия)
