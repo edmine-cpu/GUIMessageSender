@@ -5623,6 +5623,8 @@ class BroadcastFrame(ctk.CTkFrame):
                                            command=self._mass_stop_everything)
         self.mass_stop_btn.pack(side="left", padx=4, pady=4)
 
+        self._build_broadcast_status_panel(self, padx=20, pady=(0, 10))
+
         # Табы
         self.tabview = ctk.CTkTabview(self)
         self.tabview.pack(padx=20, pady=5, fill="both", expand=True)
@@ -5850,6 +5852,47 @@ class BroadcastFrame(ctk.CTkFrame):
             except Exception:
                 pass
 
+    def _build_broadcast_status_panel(self, master, padx=10, pady=(4, 10)):
+        status_panel = ctk.CTkFrame(master, fg_color=("#F8FAFC", "#111827"), corner_radius=8)
+        status_panel.pack(padx=padx, pady=pady, fill="x")
+        status_panel.grid_columnconfigure(1, weight=1)
+        status_panel.grid_columnconfigure(3, weight=1)
+
+        ctk.CTkLabel(status_panel, text="Состояние очереди", font=ctk.CTkFont(size=13, weight="bold")).grid(
+            row=0, column=0, padx=10, pady=(8, 3), sticky="w"
+        )
+        self.lbl_broadcast_state = ctk.CTkLabel(status_panel, text="Не запущено", text_color="gray60")
+        self.lbl_broadcast_state.grid(row=0, column=1, padx=8, pady=(8, 3), sticky="w")
+        self.lbl_broadcast_counts = ctk.CTkLabel(status_panel, text="—", text_color="gray60")
+        self.lbl_broadcast_counts.grid(row=0, column=2, columnspan=2, padx=8, pady=(8, 3), sticky="e")
+
+        ctk.CTkLabel(status_panel, text="Текущая:", font=ctk.CTkFont(weight="bold")).grid(
+            row=1, column=0, padx=10, pady=3, sticky="w"
+        )
+        self.lbl_broadcast_current = ctk.CTkLabel(status_panel, text="—", anchor="w")
+        self.lbl_broadcast_current.grid(row=1, column=1, columnspan=3, padx=8, pady=3, sticky="ew")
+
+        ctk.CTkLabel(status_panel, text="Следующая:", font=ctk.CTkFont(weight="bold")).grid(
+            row=2, column=0, padx=10, pady=3, sticky="w"
+        )
+        self.lbl_broadcast_next = ctk.CTkLabel(status_panel, text="—", anchor="w")
+        self.lbl_broadcast_next.grid(row=2, column=1, columnspan=3, padx=8, pady=3, sticky="ew")
+
+        ctk.CTkLabel(status_panel, text="Успешные:", font=ctk.CTkFont(weight="bold")).grid(
+            row=3, column=0, padx=10, pady=3, sticky="w"
+        )
+        self.lbl_broadcast_success = ctk.CTkLabel(status_panel, text="—", anchor="w", text_color=("#166534", "#86EFAC"))
+        self.lbl_broadcast_success.grid(row=3, column=1, columnspan=3, padx=8, pady=3, sticky="ew")
+
+        ctk.CTkLabel(status_panel, text="Ошибки:", font=ctk.CTkFont(weight="bold")).grid(
+            row=4, column=0, padx=10, pady=(3, 8), sticky="w"
+        )
+        self.lbl_broadcast_errors = ctk.CTkLabel(status_panel, text="—", anchor="w", text_color=("#991B1B", "#FCA5A5"))
+        self.lbl_broadcast_errors.grid(row=4, column=1, columnspan=2, padx=8, pady=(3, 8), sticky="ew")
+        ctk.CTkButton(status_panel, text="Обновить", width=95, command=self._refresh_broadcast_status_panel).grid(
+            row=4, column=3, padx=8, pady=(3, 8), sticky="e"
+        )
+
     def _build_mention_tab(self):
         tab = self.tab_mention
 
@@ -6037,46 +6080,6 @@ class BroadcastFrame(ctk.CTkFrame):
                       text_color="gray").pack(padx=10, anchor="w")
         ctk.CTkLabel(tab, text="Список целей редактируется во вкладке «Очередь».",
                      text_color="gray").pack(padx=10, pady=(0, 8), anchor="w")
-
-        status_panel = ctk.CTkFrame(tab, fg_color=("#F8FAFC", "#111827"), corner_radius=8)
-        status_panel.pack(padx=10, pady=(4, 10), fill="x")
-        status_panel.grid_columnconfigure(1, weight=1)
-        status_panel.grid_columnconfigure(3, weight=1)
-
-        ctk.CTkLabel(status_panel, text="Состояние очереди", font=ctk.CTkFont(size=13, weight="bold")).grid(
-            row=0, column=0, padx=10, pady=(8, 3), sticky="w"
-        )
-        self.lbl_broadcast_state = ctk.CTkLabel(status_panel, text="Не запущено", text_color="gray60")
-        self.lbl_broadcast_state.grid(row=0, column=1, padx=8, pady=(8, 3), sticky="w")
-        self.lbl_broadcast_counts = ctk.CTkLabel(status_panel, text="—", text_color="gray60")
-        self.lbl_broadcast_counts.grid(row=0, column=2, columnspan=2, padx=8, pady=(8, 3), sticky="e")
-
-        ctk.CTkLabel(status_panel, text="Текущая:", font=ctk.CTkFont(weight="bold")).grid(
-            row=1, column=0, padx=10, pady=3, sticky="w"
-        )
-        self.lbl_broadcast_current = ctk.CTkLabel(status_panel, text="—", anchor="w")
-        self.lbl_broadcast_current.grid(row=1, column=1, columnspan=3, padx=8, pady=3, sticky="ew")
-
-        ctk.CTkLabel(status_panel, text="Следующая:", font=ctk.CTkFont(weight="bold")).grid(
-            row=2, column=0, padx=10, pady=3, sticky="w"
-        )
-        self.lbl_broadcast_next = ctk.CTkLabel(status_panel, text="—", anchor="w")
-        self.lbl_broadcast_next.grid(row=2, column=1, columnspan=3, padx=8, pady=3, sticky="ew")
-
-        ctk.CTkLabel(status_panel, text="Успешные:", font=ctk.CTkFont(weight="bold")).grid(
-            row=3, column=0, padx=10, pady=3, sticky="w"
-        )
-        self.lbl_broadcast_success = ctk.CTkLabel(status_panel, text="—", anchor="w", text_color=("#166534", "#86EFAC"))
-        self.lbl_broadcast_success.grid(row=3, column=1, columnspan=3, padx=8, pady=3, sticky="ew")
-
-        ctk.CTkLabel(status_panel, text="Ошибки:", font=ctk.CTkFont(weight="bold")).grid(
-            row=4, column=0, padx=10, pady=(3, 8), sticky="w"
-        )
-        self.lbl_broadcast_errors = ctk.CTkLabel(status_panel, text="—", anchor="w", text_color=("#991B1B", "#FCA5A5"))
-        self.lbl_broadcast_errors.grid(row=4, column=1, columnspan=2, padx=8, pady=(3, 8), sticky="ew")
-        ctk.CTkButton(status_panel, text="Обновить", width=95, command=self._refresh_broadcast_status_panel).grid(
-            row=4, column=3, padx=8, pady=(3, 8), sticky="e"
-        )
 
         acc_row = ctk.CTkFrame(tab, fg_color="transparent")
         acc_row.pack(padx=10, pady=(10, 0), anchor="w")
