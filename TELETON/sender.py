@@ -24,6 +24,7 @@ from telethon.errors import (
     # Auth-специфичные — для классификации в connect()
     AuthKeyUnregisteredError,
     AuthKeyInvalidError,
+    AuthKeyDuplicatedError,
     SessionExpiredError,
     SessionRevokedError,
     UserDeactivatedError,
@@ -227,6 +228,9 @@ class TelegramSender:
                     asyncio.TimeoutError) as e:
                 print(f"  [-] Сетевая ошибка {self.account.phone}: {e}")
                 return "network"
+            except AuthKeyDuplicatedError as e:
+                print(f"  [!] Сессия недействительна {self.account.phone}: {type(e).__name__}: {e}")
+                return "auth_key_duplicated"
             except Exception as e:
                 print(f"  [-] Ошибка подключения {self.account.phone}: {e}")
                 return "error"
@@ -243,6 +247,12 @@ class TelegramSender:
         connect_result = await self._raw_connect_with_retry()
         if connect_result == "network":
             self.db.on_connect_network_issue(self.account.phone, "connect failed")
+            self._release_session_lock()
+            return False
+        if connect_result == "auth_key_duplicated":
+            self.db.set_account_status(
+                self.account.phone, ACCOUNT_STATUS_NEEDS_REAUTH,
+                "AuthKeyDuplicatedError")
             self._release_session_lock()
             return False
         if connect_result != "ok":

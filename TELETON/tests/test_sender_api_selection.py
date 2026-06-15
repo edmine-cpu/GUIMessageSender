@@ -11,7 +11,7 @@ import tempfile
 
 import pytest
 
-from models import Account, ACCOUNT_STATUS_ACTIVE
+from models import Account, ACCOUNT_STATUS_ACTIVE, ACCOUNT_STATUS_NEEDS_REAUTH
 from database import Database
 
 
@@ -112,3 +112,28 @@ class TestCreateClientApiSelection:
             _, kwargs = MockClient.call_args
             assert kwargs["device_model"] == "PC 64bit"
             assert kwargs["system_version"] == "Windows 10"
+
+
+class TestConnectAuthKeyErrors:
+    @pytest.mark.asyncio
+    async def test_auth_key_duplicated_marks_needs_reauth(self, db):
+        from sender import TelegramSender
+        from config import Config
+
+        acc = Account(phone="+79001234567", api_id=123, api_hash="h")
+        db.add_account(acc)
+
+        with patch("sender.TelegramClient") as MockClient:
+            MockClient.return_value = MagicMock()
+            sender = TelegramSender(acc, Config(), db)
+
+            async def fake_raw_connect():
+                return "auth_key_duplicated"
+
+            sender._raw_connect_with_retry = fake_raw_connect
+            connected = await sender.connect()
+
+        restored = db.get_all_accounts()[0]
+        assert connected is False
+        assert restored.status == ACCOUNT_STATUS_NEEDS_REAUTH
+        assert "AuthKeyDuplicatedError" in restored.last_status_change
