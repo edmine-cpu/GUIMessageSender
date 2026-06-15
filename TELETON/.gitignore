@@ -1,0 +1,33 @@
+﻿# Runtime/private data
+.env
+data/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+sessions/
+logs/
+
+# Python/cache/build
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+build/
+dist/
+
+# Backups/archives
+*.bak
+*.bak_*
+backup*/
+archive/
+*.zip
+*.rar
+*.7z
+
+# OS/editor
+Thumbs.db
+.DS_Store
+*.lnk
