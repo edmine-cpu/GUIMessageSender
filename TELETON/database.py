@@ -409,6 +409,13 @@ class Database:
             if "duplicate column" not in str(e).lower():
                 raise
 
+    def _table_exists(self, table: str) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        ).fetchone()
+        return row is not None
+
     # --- Accounts ---
 
     def add_account(self, account: Account):
@@ -1924,18 +1931,73 @@ class Database:
         for row in rows:
             stats[row["status"]] = row["cnt"]
             stats["total"] += row["cnt"]
+
+        if self._table_exists("publications_log"):
+            ads_rows = self.conn.execute("""
+                SELECT
+                    CASE
+                        WHEN status = 'ok' THEN 'sent'
+                        WHEN status = 'slow_mode' THEN 'flood_wait'
+                        WHEN status IN ('forbidden', 'not_member') THEN 'no_permission'
+                        ELSE status
+                    END AS status,
+                    COUNT(*) as cnt
+                FROM publications_log
+                WHERE time >= date('now', ?)
+                GROUP BY
+                    CASE
+                        WHEN status = 'ok' THEN 'sent'
+                        WHEN status = 'slow_mode' THEN 'flood_wait'
+                        WHEN status IN ('forbidden', 'not_member') THEN 'no_permission'
+                        ELSE status
+                    END
+            """, (f"-{days} days",)).fetchall()
+            for row in ads_rows:
+                stats[row["status"]] = stats.get(row["status"], 0) + row["cnt"]
+                stats["total"] += row["cnt"]
         return stats
 
     def get_per_account_stats(self, days: int = 7) -> List[dict]:
         """Per-account топ ошибок за N дней (для dashboard)."""
-        rows = self.conn.execute("""
+        rows = [dict(r) for r in self.conn.execute("""
             SELECT account_phone, status, COUNT(*) as cnt FROM send_log
             WHERE timestamp >= date('now', ?)
             GROUP BY account_phone, status
             ORDER BY account_phone, cnt DESC
-        """, (f"-{days} days",)).fetchall()
-        return [{"phone": r["account_phone"], "status": r["status"], "count": r["cnt"]}
-                for r in rows]
+        """, (f"-{days} days",)).fetchall()]
+
+        if self._table_exists("publications_log"):
+            ads_rows = self.conn.execute("""
+                SELECT
+                    account_phone,
+                    CASE
+                        WHEN status = 'ok' THEN 'sent'
+                        WHEN status = 'slow_mode' THEN 'flood_wait'
+                        WHEN status IN ('forbidden', 'not_member') THEN 'no_permission'
+                        ELSE status
+                    END AS status,
+                    COUNT(*) as cnt
+                FROM publications_log
+                WHERE time >= date('now', ?)
+                GROUP BY account_phone,
+                    CASE
+                        WHEN status = 'ok' THEN 'sent'
+                        WHEN status = 'slow_mode' THEN 'flood_wait'
+                        WHEN status IN ('forbidden', 'not_member') THEN 'no_permission'
+                        ELSE status
+                    END
+            """, (f"-{days} days",)).fetchall()
+            rows.extend(dict(r) for r in ads_rows)
+
+        combined: dict[tuple[str, str], int] = {}
+        for row in rows:
+            key = (row["account_phone"], row["status"])
+            combined[key] = combined.get(key, 0) + int(row["cnt"])
+
+        return [
+            {"phone": phone, "status": status, "count": count}
+            for (phone, status), count in sorted(combined.items())
+        ]
 
     # --- Proxy pool ---
 
