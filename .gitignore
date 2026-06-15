@@ -1,0 +1,47 @@
+# Sensitive Telegram account data
+tdata/
+**/tdata/
+
+# Runtime/private app data
+.env
+**/.env
+data/
+data*/
+**/data/
+**/data*/
+sessions/
+**/sessions/
+logs/
+**/logs/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+
+# Python/cache/build
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+**/.pytest_cache/
+.venv/
+venv/
+build/
+dist/
+
+# Backups/archives
+*.bak
+*.bak_*
+backup*/
+**/backup*/
+archive/
+**/archive/
+*.zip
+*.rar
+*.7z
+
+# OS/editor
+Thumbs.db
+.DS_Store
+*.lnk
