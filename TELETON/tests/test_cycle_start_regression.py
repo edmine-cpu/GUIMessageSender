@@ -88,6 +88,18 @@ def test_no_undefined_format_account_in_cyclic_start_path():
     assert "_cycle_has_usable_config" in src
 
 
+def test_gui_imports_sendlog_for_runtime_logging():
+    src = _load_gui_source()
+    tree = ast.parse(src)
+    imported = {
+        alias.name
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom) and node.module == "models"
+        for alias in node.names
+    }
+    assert "SendLog" in imported
+
+
 def test_cycle_has_usable_config_is_pure_and_top_level():
     """The non-UI guard that was part of fixing accs==0 for 'Все активные' campaigns."""
     fn = _find_top_level_function(_load_gui_source(), "_cycle_has_usable_config")

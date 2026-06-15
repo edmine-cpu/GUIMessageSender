@@ -16,7 +16,7 @@ import asyncio
 # Локальные модули проекта (должны быть в той же папке)
 from config import Config
 from database import Database
-from models import Account, ACCOUNT_STATUS_ACTIVE, ACCOUNT_STATUS_NEEDS_REAUTH, ACCOUNT_STATUS_BANNED, ACCOUNT_STATUS_NETWORK_ISSUE
+from models import Account, SendLog, ACCOUNT_STATUS_ACTIVE, ACCOUNT_STATUS_NEEDS_REAUTH, ACCOUNT_STATUS_BANNED, ACCOUNT_STATUS_NETWORK_ISSUE
 
 try:
     from file_logger import log_exception
