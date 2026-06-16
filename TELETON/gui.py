@@ -201,10 +201,296 @@ def _collect_tdata_dirs(root: str) -> list:
     return found
 
 
+def _import_result(source: str, ref: str = "", phone: str = "",
+                   action: str = "failed", reason: str = "") -> dict:
+    return {
+        "source": source or "",
+        "ref": ref or "",
+        "phone": phone or "",
+        "status": "ok" if action in ("added", "updated") else "failed",
+        "action": action or "failed",
+        "reason": reason or "",
+    }
+
+
+def _summarize_import_results(expected: int, results: list,
+                              empty_kind: str = "fail",
+                              empty_text: str = "") -> dict:
+    expected = int(expected or 0)
+    results = list(results or [])
+    added = sum(1 for r in results if r.get("action") == "added")
+    updated = sum(1 for r in results if r.get("action") == "updated")
+    skipped = sum(1 for r in results if r.get("action") == "skipped")
+    failed = sum(1 for r in results if r.get("action") == "failed")
+    ok = added + updated
+
+    if expected <= 0 and not results:
+        kind = empty_kind
+        text = empty_text or "Импорт не выполнен: нет аккаунтов для обработки"
+    elif ok <= 0:
+        kind = "fail"
+        text = f"Импорт не удался: обработано {expected}, добавлено 0, обновлено 0"
+    elif failed or skipped or ok < expected:
+        kind = "partial"
+        text = (f"Импорт частичный: добавлено {added}, обновлено {updated}, "
+                f"не добавлено {failed + skipped} из {expected}")
+    else:
+        kind = "success"
+        text = f"Импорт успешен: добавлено {added}, обновлено {updated}"
+
+    return {
+        "kind": kind,
+        "added": added,
+        "updated": updated,
+        "skipped": skipped,
+        "failed": failed,
+        "expected": expected,
+        "results": results,
+        "text": text,
+    }
+
+
+def _cleanup_session_files(session_name: str):
+    for suffix in (".session", ".session-journal"):
+        try:
+            p = session_name + suffix
+            if os.path.exists(p):
+                os.remove(p)
+        except Exception:
+            pass
+
+
+def _move_session_file(current_session_name: str, target_session_name: str,
+                       overwrite_existing: bool = False) -> tuple[bool, str]:
+    old_session = current_session_name + ".session"
+    new_session = target_session_name + ".session"
+    old_journal = current_session_name + ".session-journal"
+    new_journal = target_session_name + ".session-journal"
+
+    if not os.path.exists(old_session):
+        return False, f"session-файл не создался: {old_session}"
+
+    if os.path.abspath(old_session) != os.path.abspath(new_session):
+        if os.path.exists(new_session):
+            if not overwrite_existing:
+                return False, f"целевой session-файл уже существует: {new_session}"
+            try:
+                os.remove(new_session)
+            except Exception as e:
+                return False, f"не удалось удалить старый session: {type(e).__name__}"
+        if overwrite_existing and os.path.exists(new_journal):
+            try:
+                os.remove(new_journal)
+            except Exception:
+                pass
+        try:
+            os.rename(old_session, new_session)
+        except Exception as e:
+            return False, f"не удалось переименовать session: {type(e).__name__}"
+
+    if os.path.exists(old_journal):
+        try:
+            os.remove(old_journal)
+        except Exception:
+            pass
+
+    return True, ""
+
+
+def _save_imported_account(db_path: str, phone: str, session_name: str,
+                           proxy: str, device_fields: dict) -> str:
+    db = Database(db_path)
+    try:
+        all_accs = db.get_all_accounts()
+        existing_acc = next((a for a in all_accs if a.phone == phone), None)
+        if existing_acc is not None:
+            acc = existing_acc
+            action = "updated"
+        else:
+            acc = Account(phone=phone)
+            action = "added"
+
+        acc.session_name = session_name
+        acc.proxy = proxy or ""
+        for key, value in (device_fields or {}).items():
+            setattr(acc, key, value)
+        db.add_account(acc)
+        return action
+    finally:
+        db.close()
+
+
+def _session_candidate_from_filename(sessions_dir: str, filename: str):
+    if "tdata_" in filename:
+        return None
+
+    phone = ""
+    if filename.startswith("session_") and filename.endswith(".session"):
+        phone = filename[len("session_"):-len(".session")]
+    elif filename.endswith("_telethon.session"):
+        phone = filename[:-len("_telethon.session")]
+
+    if not phone or phone.startswith("tdata_"):
+        return None
+
+    session_path = os.path.join(sessions_dir, filename)
+    return {
+        "declared_phone": phone,
+        "session_name": session_path[:-len(".session")],
+        "filename": filename,
+    }
+
+
+async def _verify_session_account(session_name: str, declared_phone: str,
+                                  proxy: str = "", connect_timeout: int = 20,
+                                  getme_timeout: int = 20) -> dict:
+    from telethon import TelegramClient
+    from config import OWN_API_ID, OWN_API_HASH
+    from sender import TelegramSender
+
+    ref = os.path.basename(session_name) + ".session"
+    if not OWN_API_ID or not OWN_API_HASH:
+        return _import_result(
+            "session", ref, declared_phone, "failed",
+            "не задан OWN_API_ID/OWN_API_HASH для проверки .session",
+        )
+
+    proxy_tuple = None
+    if proxy:
+        try:
+            proxy_tuple = TelegramSender._parse_proxy(proxy)
+        except Exception as e:
+            return _import_result(
+                "session", ref, declared_phone, "failed",
+                f"ошибка proxy: {type(e).__name__}",
+            )
+
+    client = TelegramClient(
+        session_name,
+        OWN_API_ID,
+        OWN_API_HASH,
+        proxy=proxy_tuple,
+        device_model="PC 64bit",
+        system_version="Windows 10",
+        app_version="1.0",
+        lang_code="en",
+        system_lang_code="en",
+    )
+    try:
+        await asyncio.wait_for(client.connect(), timeout=connect_timeout)
+        authorized = await asyncio.wait_for(
+            client.is_user_authorized(), timeout=getme_timeout)
+        if not authorized:
+            return _import_result(
+                "session", ref, declared_phone, "failed",
+                "сессия не авторизована",
+            )
+        me = await asyncio.wait_for(client.get_me(), timeout=getme_timeout)
+        if not me or not getattr(me, "phone", None):
+            return _import_result(
+                "session", ref, declared_phone, "failed",
+                "Telegram не вернул номер телефона",
+            )
+        return _import_result("session", ref, f"+{me.phone}", "added", "")
+    except Exception as e:
+        log_exception("accounts", e, context=f"Verify session {session_name}")
+        return _import_result(
+            "session", ref, declared_phone, "failed",
+            f"{type(e).__name__}: {_hint_for(e)}",
+        )
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+
+
+def import_session_files_to_db(candidates: list, proxy_for_index,
+                               sessions_dir: str, db_path: str,
+                               log_cb=print) -> dict:
+    def _emit(msg: str):
+        try:
+            log_cb(msg)
+        except Exception:
+            pass
+
+    candidates = list(candidates or [])
+    results = []
+    loop = asyncio.new_event_loop()
+
+    async def do_import():
+        from config import OWN_API_ID, OWN_API_HASH
+
+        device_fields = {
+            "api_id": OWN_API_ID,
+            "api_hash": OWN_API_HASH,
+            "device_model": "PC 64bit",
+            "system_version": "Windows 10",
+            "app_version": "1.0",
+            "lang_code": "en",
+        }
+
+        for idx, cand in enumerate(candidates):
+            filename = cand.get("filename") or ""
+            declared_phone = cand.get("declared_phone") or ""
+            session_name = cand.get("session_name") or ""
+            proxy = proxy_for_index(idx) if callable(proxy_for_index) else (proxy_for_index or "")
+
+            _emit(f"[~] Проверяю session: {filename}")
+            res = await _verify_session_account(
+                session_name, declared_phone, proxy=proxy)
+            if res.get("action") != "added":
+                results.append(res)
+                _emit(f"[-] {filename} не добавлен: {res.get('reason', '')}")
+                continue
+
+            phone = res.get("phone", "")
+            standard_path = os.path.join(sessions_dir, f"session_{phone}")
+            ok, reason = _move_session_file(
+                session_name, standard_path, overwrite_existing=False)
+            if not ok:
+                res["action"] = "failed"
+                res["status"] = "failed"
+                res["reason"] = reason
+                results.append(res)
+                _emit(f"[-] {filename} не добавлен: {reason}")
+                continue
+
+            try:
+                action = _save_imported_account(
+                    db_path, phone, standard_path, proxy, device_fields)
+                res["action"] = action
+                res["status"] = "ok"
+                res["reason"] = ""
+                results.append(res)
+                sign = "+" if action == "added" else "~"
+                label = "добавлен" if action == "added" else "обновлён"
+                _emit(f"[{sign}] {phone} {label}")
+            except Exception as e:
+                log_exception("accounts", e, context=f"DB write for session {phone}")
+                res["action"] = "failed"
+                res["status"] = "failed"
+                res["reason"] = f"ошибка БД: {type(e).__name__}"
+                results.append(res)
+                _emit(f"[-] {filename} не добавлен: {res['reason']}")
+
+    try:
+        _run_loop(loop, do_import())
+    except Exception as e:
+        log_exception("accounts", e, context="import_session_files_to_db")
+        results.append(_import_result(
+            "session", "", "", "failed",
+            f"ошибка импорта session: {type(e).__name__}",
+        ))
+
+    return _summarize_import_results(len(candidates), results)
+
+
 def import_tdata_dir_to_db(tdata_path: str, proxy: str,
                            sessions_dir: str, db_path: str,
                            log_cb=print) -> dict:
     proxy = (proxy or "").strip()
+    results = []
 
     def _emit(msg: str):
         try:
@@ -216,13 +502,6 @@ def import_tdata_dir_to_db(tdata_path: str, proxy: str,
         except Exception:
             pass
 
-    try:
-        db0 = Database(db_path)
-        accounts_before = len(db0.get_all_accounts())
-        db0.close()
-    except Exception:
-        accounts_before = 0
-
     expected = 0
 
     try:
@@ -232,8 +511,10 @@ def import_tdata_dir_to_db(tdata_path: str, proxy: str,
         from config import DESKTOP_API_ID, DESKTOP_API_HASH
     except Exception as e:
         _emit(f"[!] opentele недоступна: {type(e).__name__}: {e}")
-        return {"kind": "fail_early", "added": 0, "expected": 0,
-                "text": f"opentele не установлена: {type(e).__name__}"}
+        return _summarize_import_results(
+            0, [], "fail_early",
+            f"opentele не установлена: {type(e).__name__}",
+        )
 
     if not _is_tdata_dir(tdata_path):
         nested = _collect_tdata_dirs(tdata_path)
@@ -245,8 +526,7 @@ def import_tdata_dir_to_db(tdata_path: str, proxy: str,
         else:
             _emit(f"[!] Папка не похожа на TData: {tdata_path}")
             text = f"папка не похожа на TData (нет key_datas/hex): {tdata_path}"
-        return {"kind": "fail_early", "added": 0, "expected": 0,
-                "text": text}
+        return _summarize_import_results(0, [], "fail_early", text)
 
     try:
         os.makedirs(sessions_dir, exist_ok=True)
@@ -256,8 +536,10 @@ def import_tdata_dir_to_db(tdata_path: str, proxy: str,
         os.remove(probe)
     except Exception as e:
         _emit(f"[!] Нет прав на запись в {sessions_dir}: {type(e).__name__}: {e}")
-        return {"kind": "fail_early", "added": 0, "expected": 0,
-                "text": f"нет прав на запись в sessions ({sessions_dir}): {type(e).__name__}"}
+        return _summarize_import_results(
+            0, [], "fail_early",
+            f"нет прав на запись в sessions ({sessions_dir}): {type(e).__name__}",
+        )
 
     try:
         tdesk = TDesktop(tdata_path)
@@ -267,13 +549,17 @@ def import_tdata_dir_to_db(tdata_path: str, proxy: str,
         log_exception("accounts", e, context=f"TDesktop({tdata_path}) init failed")
         _emit(f"[!] Не могу прочитать TData: {type(e).__name__}")
         _emit(f"[!] Подсказка: {_hint_for(e)}")
-        return {"kind": "fail_early", "added": 0, "expected": 0,
-                "text": f"ошибка чтения TData ({type(e).__name__}) по пути {tdata_path}"}
+        return _summarize_import_results(
+            0, [], "fail_early",
+            f"ошибка чтения TData ({type(e).__name__}) по пути {tdata_path}",
+        )
 
     if not tdesk.isLoaded() or tdesk.accountsCount == 0:
         _emit("[!] TData не содержит аккаунтов или повреждена")
-        return {"kind": "fail", "added": 0, "expected": 0,
-                "text": "TData пустая или повреждена"}
+        return _summarize_import_results(
+            0, [], "fail",
+            "TData пустая или повреждена",
+        )
 
     expected = int(tdesk.accountsCount or 0)
     _emit(f"[~] TData: найдено аккаунтов: {expected} ({os.path.basename(tdata_path)})")
@@ -299,6 +585,7 @@ def import_tdata_dir_to_db(tdata_path: str, proxy: str,
     async def do_convert():
         for idx, td_acc in enumerate(tdesk.accounts):
             user_id = td_acc.UserId
+            ref = f"userId={user_id}"
             session_path = os.path.join(sessions_dir, f"session_tdata_{user_id}")
             proxy_tuple = None
             if proxy:
@@ -307,13 +594,16 @@ def import_tdata_dir_to_db(tdata_path: str, proxy: str,
                     proxy_tuple = s._parse_proxy(proxy)
                 except Exception as e:
                     log_exception("accounts", e, context=f"Parse proxy for userId={user_id}")
-                    _emit(f"[-] Не могу разобрать прокси: {type(e).__name__}: {e}")
+                    reason = f"ошибка proxy: {type(e).__name__}: {e}"
+                    results.append(_import_result("tdata", ref, "", "failed", reason))
+                    _emit(f"[-] {ref}: {reason}")
                     continue
 
             td_api = API.TelegramDesktop(api_id=DESKTOP_API_ID, api_hash=DESKTOP_API_HASH)
 
             client = None
             phone = None
+            fail_reason = ""
             try:
                 _emit(f"[~] ({idx+1}/{expected}) ToTelethon userId={user_id}")
                 client = await tdesk.ToTelethon(
@@ -339,7 +629,8 @@ def import_tdata_dir_to_db(tdata_path: str, proxy: str,
                     log_cb=_emit,
                 )
                 if not authorized:
-                    _emit(f"[-] userId={user_id}: TData не авторизована, аккаунт не добавлен")
+                    fail_reason = "TData не авторизована"
+                    _emit(f"[-] {ref}: {fail_reason}, аккаунт не добавлен")
                 else:
                     me = await _try_with_flood_retry(
                         lambda: asyncio.wait_for(client.get_me(), timeout=getme_timeout),
@@ -349,13 +640,15 @@ def import_tdata_dir_to_db(tdata_path: str, proxy: str,
                         log_cb=_emit,
                     )
                     if not me or not getattr(me, "phone", None):
-                        _emit(f"[-] userId={user_id}: Telegram не вернул номер телефона, аккаунт не добавлен")
+                        fail_reason = "Telegram не вернул номер телефона"
+                        _emit(f"[-] {ref}: {fail_reason}, аккаунт не добавлен")
                     else:
                         phone = f"+{me.phone}"
                         _emit(f"[+] Конвертирован: {phone}")
             except Exception as e:
                 log_exception("accounts", e, context=f"Convert userId={user_id}")
-                _emit(f"[-] Ошибка конвертации userId={user_id}: {type(e).__name__}")
+                fail_reason = f"ошибка конвертации: {type(e).__name__}"
+                _emit(f"[-] Ошибка конвертации {ref}: {type(e).__name__}")
                 _emit(f"[-] Подсказка: {_hint_for(e)}")
                 phone = None
             finally:
@@ -366,79 +659,40 @@ def import_tdata_dir_to_db(tdata_path: str, proxy: str,
                         pass
 
             if not phone:
-                for suffix in (".session", ".session-journal"):
-                    try:
-                        p = session_path + suffix
-                        if os.path.exists(p):
-                            os.remove(p)
-                    except Exception:
-                        pass
+                _cleanup_session_files(session_path)
+                results.append(_import_result(
+                    "tdata", ref, "", "failed",
+                    fail_reason or "аккаунт не подтверждён",
+                ))
                 continue
 
             standard_path = os.path.join(sessions_dir, f"session_{phone}")
-            old_session = session_path + ".session"
-            new_session = standard_path + ".session"
-            old_journal = session_path + ".session-journal"
-
-            try:
-                if not os.path.exists(old_session):
-                    _emit(f"[-] session-файл не создался: {old_session}")
-                    continue
-                if (os.path.exists(new_session)
-                        and os.path.abspath(new_session) != os.path.abspath(old_session)):
-                    try:
-                        os.remove(new_session)
-                    except Exception:
-                        pass
-                os.rename(old_session, new_session)
-                if os.path.exists(old_journal):
-                    try:
-                        os.remove(old_journal)
-                    except Exception:
-                        pass
-            except Exception as e:
-                log_exception("accounts", e, context=f"Rename session for {phone}")
-                _emit(f"[-] Не удалось переименовать session для {phone}: {type(e).__name__}")
-                _emit(f"[-] Подсказка: {_hint_for(e)}")
+            ok, reason = _move_session_file(
+                session_path, standard_path, overwrite_existing=True)
+            if not ok:
+                _emit(f"[-] {phone} не добавлен: {reason}")
+                results.append(_import_result("tdata", ref, phone, "failed", reason))
                 continue
 
             try:
-                db = Database(db_path)
-                try:
-                    all_accs = db.get_all_accounts()
-                    existing_acc = next((a for a in all_accs if a.phone == phone), None)
-                    from models import Account as _Account
-                    tdata_device = {
-                        "api_id": DESKTOP_API_ID,
-                        "api_hash": DESKTOP_API_HASH,
-                        "device_model": "Desktop",
-                        "system_version": "Windows 10",
-                        "app_version": "5.6.3 x64",
-                        "lang_code": "ru",
-                    }
-                    if existing_acc is not None:
-                        new_acc = _Account(
-                            phone=phone,
-                            session_name=standard_path,
-                            proxy=proxy,
-                            is_active=existing_acc.is_active,
-                            sent_today=existing_acc.sent_today,
-                            last_reset_date=existing_acc.last_reset_date,
-                            **tdata_device,
-                        )
-                    else:
-                        new_acc = _Account(
-                            phone=phone,
-                            session_name=standard_path,
-                            proxy=proxy,
-                            **tdata_device,
-                        )
-                    db.add_account(new_acc)
-                finally:
-                    db.close()
-                _emit(f"[+] Добавлен в БД: {phone}")
+                tdata_device = {
+                    "api_id": DESKTOP_API_ID,
+                    "api_hash": DESKTOP_API_HASH,
+                    "device_model": "Desktop",
+                    "system_version": "Windows 10",
+                    "app_version": "5.6.3 x64",
+                    "lang_code": "ru",
+                }
+                action = _save_imported_account(
+                    db_path, phone, standard_path, proxy, tdata_device)
+                results.append(_import_result("tdata", ref, phone, action, ""))
+                sign = "+" if action == "added" else "~"
+                label = "добавлен" if action == "added" else "обновлён"
+                _emit(f"[{sign}] {phone} {label}")
             except Exception as e:
                 log_exception("accounts", e, context=f"DB write for {phone}")
+                reason = f"ошибка БД: {type(e).__name__}"
+                results.append(_import_result("tdata", ref, phone, "failed", reason))
                 _emit(f"[-] Ошибка записи в БД для {phone}: {type(e).__name__}")
                 _emit(f"[-] Подсказка: {_hint_for(e)}")
 
@@ -448,30 +702,15 @@ def import_tdata_dir_to_db(tdata_path: str, proxy: str,
         log_exception("accounts", e, context="import_tdata_dir_to_db top-level")
         _emit(f"[-] Ошибка импорта TData: {type(e).__name__}")
         _emit(f"[-] Подсказка: {_hint_for(e)}")
+        results.append(_import_result(
+            "tdata", os.path.basename(tdata_path), "", "failed",
+            f"ошибка импорта TData: {type(e).__name__}",
+        ))
 
-    try:
-        db1 = Database(db_path)
-        accounts_after = len(db1.get_all_accounts())
-        db1.close()
-    except Exception:
-        accounts_after = accounts_before
-
-    added = accounts_after - accounts_before
-    if added <= 0 and expected <= 0:
-        kind = "fail_early"
-        # Если дошли сюда без раннего reason — всё равно даём путь в тексте (для emit/res["text"] в bulk)
-        text = f"Импорт прерван до чтения TData (путь: {tdata_path})"
-    elif added <= 0 and expected > 0:
-        kind = "fail"
-        text = f"Импорт не удался: TData содержит {expected}, добавлено 0"
-    elif added < expected:
-        kind = "partial"
-        text = f"Импорт частичный: добавлено {added} из {expected}"
-    else:
-        kind = "success"
-        text = f"Импорт успешен: добавлено {added} (ожидалось {expected})"
-
-    return {"kind": kind, "added": added, "expected": expected, "text": text}
+    return _summarize_import_results(
+        expected, results, "fail_early",
+        f"Импорт прерван до чтения TData (путь: {tdata_path})",
+    )
 
 
 # --- Перехват print() — thread-safe через threading.local() ---
@@ -1477,37 +1716,50 @@ class BulkAccountsDialog(ctk.CTkToplevel):
             self.log.append("[!] Пул прокси пуст — добавьте прокси во вкладке «Прокси»")
             return
 
-        db = Database(self.app.config.db_path)
-        try:
-            added = 0
-            updated = 0
-            pool_idx = 0
-            for phone, session_name in selected:
-                if phone.startswith("tdata_"):
-                    # Пропускаем tdata_* (session_tdata_*.session) — временные служебные сессии без реального номера;
-                    # они создаются при конвертации TData (см. session_tdata_{userId}) и не должны добавляться в БД.
-                    self.log.append(f"[!] Пропущен tdata_* (служебная сессия): {phone}")
-                    continue
-                db.add_account(Account(phone=phone, session_name=session_name))
-                added += 1
+        candidates = []
+        for phone, session_name in selected:
+            filename = os.path.basename(session_name) + ".session"
+            candidates.append({
+                "declared_phone": phone,
+                "session_name": session_name,
+                "filename": filename,
+            })
 
-                if proxy_mode == "single" and proxy_value:
-                    db.conn.execute("UPDATE accounts SET proxy=? WHERE phone=?",
-                                    (proxy_value, phone))
-                    updated += 1
-                elif proxy_mode == "round" and pool:
-                    p = pool[pool_idx % len(pool)]
-                    pool_idx += 1
-                    db.conn.execute("UPDATE accounts SET proxy=? WHERE phone=?",
-                                    (p, phone))
-                    updated += 1
-            db.conn.commit()
-        finally:
-            db.close()
+        self._ui_queue.put(f"[~] Проверяю session-файлы: {len(candidates)}")
 
-        self.log.append(f"[+] Импорт: добавлено {added}, назначено прокси: {updated}")
-        self._refresh_accounts_list()
-        self._scan_sessions_dir()
+        def proxy_for_index(i: int) -> str:
+            if proxy_mode == "single":
+                return proxy_value
+            if proxy_mode == "round" and pool:
+                return pool[i % len(pool)]
+            return ""
+
+        def worker():
+            def emit(m: str):
+                self._ui_queue.put(m)
+
+            try:
+                res = import_session_files_to_db(
+                    candidates=candidates,
+                    proxy_for_index=proxy_for_index,
+                    sessions_dir=self.app.config.sessions_dir,
+                    db_path=self.app.config.db_path,
+                    log_cb=emit,
+                )
+                emit(f"[=] {res.get('text', '')}")
+            except Exception as e:
+                log_exception("accounts", e, context="bulk session import")
+                emit(f"[-] Ошибка импорта session: {type(e).__name__}: {e}")
+            finally:
+                def _done():
+                    self._refresh_accounts_list()
+                    self._scan_sessions_dir()
+                try:
+                    self.after(0, _done)
+                except Exception:
+                    pass
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _set_tdata_source(self, kind: str, path: str):
         kind = (kind or "").strip()
@@ -1605,6 +1857,8 @@ class BulkAccountsDialog(ctk.CTkToplevel):
 
         totals = {"success": 0, "partial": 0, "fail": 0, "fail_early": 0}
         added_total = 0
+        updated_total = 0
+        failed_total = 0
         expected_total = 0
 
         for i, p in enumerate(tdata_dirs):
@@ -1626,12 +1880,24 @@ class BulkAccountsDialog(ctk.CTkToplevel):
             kind = res.get("kind", "fail")
             totals[kind] = totals.get(kind, 0) + 1
             added_total += int(res.get("added", 0) or 0)
+            updated_total += int(res.get("updated", 0) or 0)
+            failed_total += int(res.get("failed", 0) or 0) + int(res.get("skipped", 0) or 0)
             expected_total += int(res.get("expected", 0) or 0)
+            for item in res.get("results", []) or []:
+                phone = item.get("phone") or item.get("ref") or item.get("source") or "?"
+                action = item.get("action", "")
+                reason = item.get("reason", "")
+                if action == "added":
+                    emit(f"[+] {phone} добавлен")
+                elif action == "updated":
+                    emit(f"[~] {phone} обновлён")
+                else:
+                    emit(f"[-] {phone} не добавлен: {reason}")
             emit(f"[=] {res.get('text', '')}")
 
         emit("\n[=] === ИТОГО ===")
         emit(f"[=] Папок: {len(tdata_dirs)} | success={totals.get('success', 0)} | partial={totals.get('partial', 0)} | fail={totals.get('fail', 0)} | fail_early={totals.get('fail_early', 0)}")
-        emit(f"[=] Добавлено аккаунтов: {added_total} (ожидалось суммарно: {expected_total})")
+        emit(f"[=] Добавлено: {added_total} | обновлено: {updated_total} | не добавлено: {failed_total} | ожидалось: {expected_total}")
 
     def _build_proxies_tab(self):
         top = ctk.CTkFrame(self.tab_proxies, fg_color="transparent")
@@ -3079,53 +3345,52 @@ class AccountsFrame(ctk.CTkFrame):
             return
 
         db = Database(self.app.config.db_path)
-        existing = {acc.phone for acc in db.get_all_accounts()}
-        db.close()
-
-        imported = 0
-        skipped = 0
-
-        for filename in os.listdir(sessions_dir):
-            phone = None
-            session_name = None
-
-            # Формат 1: session_{phone}.session  (текущий, из Account.__post_init__)
-            if filename.startswith("session_") and filename.endswith(".session"):
-                phone = filename[len("session_"):-len(".session")]
-                session_path = os.path.join(sessions_dir, filename)
-                session_name = session_path.replace(".session", "")
-
-            # Формат 2: {phone}_telethon.session  (старый импортированный формат)
-            elif filename.endswith("_telethon.session"):
-                phone = filename.replace("_telethon.session", "")
-                session_path = os.path.join(sessions_dir, filename)
-                session_name = session_path.replace(".session", "")
-
-            if not phone or not session_name:
-                continue
-
-            if phone.startswith("tdata_"):
-                skipped += 1
-                # Пропуск tdata_* temp sessions (из TData конверта): не имеют реального phone, не добавляем в БД
-                self.log.append(f"[!] Пропущена временная TData-сессия без номера: {filename}")
-                continue
-
-            if phone in existing:
-                skipped += 1
-                continue
-
-            db = Database(self.app.config.db_path)
-            db.add_account(Account(
-                phone=phone,
-                session_name=session_name,
-            ))
+        try:
+            existing = {acc.phone for acc in db.get_all_accounts()}
+        finally:
             db.close()
-            existing.add(phone)
-            imported += 1
-            self.log.append(f"[+] Импортирован: {phone}")
 
-        self.log.append(f"[+] Готово: добавлено {imported}, пропущено {skipped}")
-        self.refresh()
+        candidates = []
+        skipped = 0
+        for filename in os.listdir(sessions_dir):
+            cand = _session_candidate_from_filename(sessions_dir, filename)
+            if not cand:
+                continue
+            if cand["declared_phone"] in existing:
+                skipped += 1
+                continue
+            candidates.append(cand)
+
+        if not candidates:
+            self.log.append(f"[!] Нет новых .session для проверки (пропущено существующих: {skipped})")
+            return
+
+        self.btn_import.configure(state="disabled", text="Проверка...")
+        self.log.append(f"[~] Проверяю session-файлы: {len(candidates)}")
+
+        log_queue = self.app.log_queue
+
+        def worker():
+            def emit(m: str):
+                log_queue.put(("accounts_log", m))
+
+            try:
+                res = import_session_files_to_db(
+                    candidates=candidates,
+                    proxy_for_index="",
+                    sessions_dir=sessions_dir,
+                    db_path=self.app.config.db_path,
+                    log_cb=emit,
+                )
+                emit(f"[=] {res.get('text', '')}")
+            except Exception as e:
+                log_exception("accounts", e, context="accounts session import")
+                emit(f"[-] Ошибка импорта session: {type(e).__name__}: {e}")
+            finally:
+                log_queue.put(("accounts_sessions_done", None))
+
+        threading.Thread(target=worker, daemon=True).start()
+        return
 
     def _import_tdata(self):
         _log_action("accounts", "_import_tdata")
@@ -3137,6 +3402,49 @@ class AccountsFrame(ctk.CTkFrame):
         tdata_path = dialog.result["path"]
         proxy      = dialog.result["proxy"]
         sessions_dir = self.app.config.sessions_dir
+
+        self.btn_import_tdata.configure(state="disabled", text="Конвертация...")
+        self.log.append(f"[~] Конвертирую TData: {tdata_path}")
+
+        log_queue = self.app.log_queue
+
+        def tdata_thread():
+            _thread_local.log_handler = lambda m: log_queue.put(("accounts_log", m))
+            _thread_local.log_tag = "accounts"
+            try:
+                res = import_tdata_dir_to_db(
+                    tdata_path=tdata_path,
+                    proxy=proxy,
+                    sessions_dir=sessions_dir,
+                    db_path=self.app.config.db_path,
+                    log_cb=print,
+                )
+                for item in res.get("results", []) or []:
+                    phone = item.get("phone") or item.get("ref") or "?"
+                    action = item.get("action", "")
+                    reason = item.get("reason", "")
+                    if action == "added":
+                        print(f"[+] {phone} добавлен")
+                    elif action == "updated":
+                        print(f"[~] {phone} обновлён")
+                    else:
+                        print(f"[-] {phone} не добавлен: {reason}")
+                log_queue.put(("accounts_import_summary", (
+                    res.get("kind", "fail"),
+                    res.get("text", ""),
+                    res.get("added", 0),
+                    res.get("expected", 0),
+                )))
+            except Exception as e:
+                log_exception("accounts", e, context="tdata_thread top-level")
+                print(f"[-] Ошибка импорта TData: {type(e).__name__}")
+                print(f"[-] Подсказка: {_hint_for(e)}")
+            finally:
+                _thread_local.log_handler = None
+                log_queue.put(("accounts_tdata_done", None))
+
+        threading.Thread(target=tdata_thread, daemon=True).start()
+        return
 
         self.btn_import_tdata.configure(state="disabled", text="Конвертация...")
         self.log.append(f"[~] Конвертирую TData: {tdata_path}")
@@ -3775,6 +4083,12 @@ class AccountsFrame(ctk.CTkFrame):
     def on_queue_message(self, tag, msg):
         if tag == "accounts_log":
             self.log.append(msg)
+        elif tag == "accounts_sessions_done":
+            try:
+                self.btn_import.configure(state="normal", text="Импорт сессий")
+            except Exception:
+                pass
+            self.refresh()
         elif tag == "accounts_tdata_done":
             self.btn_import_tdata.configure(state="normal", text="Импорт TData")
             self.refresh()

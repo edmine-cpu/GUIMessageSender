@@ -438,8 +438,11 @@ class Database:
             INSERT OR REPLACE INTO accounts
             (phone, session_name, proxy, is_active, sent_today, last_reset_date,
              api_id, api_hash, device_model, system_version, app_version, lang_code,
-             status, flood_until, connect_fail_count, last_status_change, custom_name)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             status, flood_until, connect_fail_count, last_status_change,
+             paused_until, pause_reason, last_check_ok_at, last_send_at,
+             last_action_at, actions_today, error_today, last_error_at,
+             last_error_text, custom_name)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             account.phone, account.session_name, account.proxy,
             int(account.is_active), account.sent_today, account.last_reset_date,
@@ -448,6 +451,11 @@ class Database:
             account.app_version, account.lang_code,
             account.status, account.flood_until,
             account.connect_fail_count, account.last_status_change,
+            account.paused_until, account.pause_reason,
+            account.last_check_ok_at, account.last_send_at,
+            account.last_action_at, account.actions_today,
+            account.error_today, account.last_error_at,
+            account.last_error_text,
             account.custom_name or "",
         ))
         self.conn.commit()
