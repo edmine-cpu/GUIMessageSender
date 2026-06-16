@@ -10,7 +10,7 @@ from models import (
 )
 
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 # Cooldown для network_issue — через сколько пробуем reconnect
 NETWORK_RECOVERY_MINUTES = 5
@@ -396,6 +396,20 @@ class Database:
             self._add_column_if_missing(
                 cur, "accounts", "custom_name TEXT DEFAULT ''"
             )
+
+        # ─── v18: campaign-local text template and default target rules ──
+        if current_version < 18:
+            v18_campaign_columns = (
+                "message_template_id INTEGER DEFAULT NULL",
+                "default_hours_start INTEGER NOT NULL DEFAULT 0",
+                "default_hours_end INTEGER NOT NULL DEFAULT 23",
+                "default_interval_min_seconds INTEGER NOT NULL DEFAULT 0",
+                "default_interval_max_seconds INTEGER NOT NULL DEFAULT 0",
+                "default_min_new_messages INTEGER NOT NULL DEFAULT 0",
+                "default_fallback_hours INTEGER NOT NULL DEFAULT 0",
+            )
+            for col_def in v18_campaign_columns:
+                self._add_column_if_missing(cur, "cycle_campaigns", col_def)
 
         cur.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self.conn.commit()
@@ -1514,6 +1528,13 @@ class Database:
         send_delay_min_seconds: int | None = None,
         send_delay_max_seconds: int | None = None,
         round_pause_seconds: int | None = None,
+        message_template_id: int | None = None,
+        default_hours_start: int | None = None,
+        default_hours_end: int | None = None,
+        default_interval_min_seconds: int | None = None,
+        default_interval_max_seconds: int | None = None,
+        default_min_new_messages: int | None = None,
+        default_fallback_hours: int | None = None,
     ):
         now = datetime.now().isoformat(timespec="seconds")
         if send_delay_min_seconds is None:
@@ -1527,6 +1548,13 @@ class Database:
         round_pause_seconds = max(0, int(round_pause_seconds or 0))
         account_filter = (account_filter or "").strip()
         rotate_after_n_sends = max(0, int(rotate_after_n_sends or 0))
+        message_template_id = int(message_template_id) if message_template_id else None
+        default_hours_start = max(0, min(23, int(default_hours_start if default_hours_start is not None else 0)))
+        default_hours_end = max(0, min(23, int(default_hours_end if default_hours_end is not None else 23)))
+        default_interval_min_seconds = max(0, int(default_interval_min_seconds or 0))
+        default_interval_max_seconds = max(default_interval_min_seconds, int(default_interval_max_seconds or default_interval_min_seconds))
+        default_min_new_messages = max(0, int(default_min_new_messages or 0))
+        default_fallback_hours = max(0, int(default_fallback_hours or 0))
 
         self.conn.execute("""
             UPDATE cycle_campaigns
@@ -1535,6 +1563,10 @@ class Database:
                 enabled = ?, updated_at = ?
                 , account_filter = ?, rotate_after_n_sends = ?
                 , send_delay_min_seconds = ?, send_delay_max_seconds = ?, round_pause_seconds = ?
+                , message_template_id = ?
+                , default_hours_start = ?, default_hours_end = ?
+                , default_interval_min_seconds = ?, default_interval_max_seconds = ?
+                , default_min_new_messages = ?, default_fallback_hours = ?
             WHERE id = ?
         """, (
             targets_source, template_id,
@@ -1542,6 +1574,10 @@ class Database:
             unique_mode, int(enabled), now,
             account_filter, rotate_after_n_sends,
             send_delay_min_seconds, send_delay_max_seconds, round_pause_seconds,
+            message_template_id,
+            default_hours_start, default_hours_end,
+            default_interval_min_seconds, default_interval_max_seconds,
+            default_min_new_messages, default_fallback_hours,
             campaign_id,
         ))
         self.conn.commit()

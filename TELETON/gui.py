@@ -2343,6 +2343,7 @@ class ListTemplateDialog(ctk.CTkToplevel):
             "Смешанный": "mixed",
             "Группы": "groups",
             "Каналы": "channels",
+            "Тексты": "messages",
         }
         self._kind_map_rev = {v: k for k, v in self._kind_map.items()}
 
@@ -3981,7 +3982,7 @@ class ListTemplatesFrame(ctk.CTkFrame):
         self.refresh()
 
     def _kind_label(self, kind: str) -> str:
-        return {"mixed": "Смешанный", "groups": "Группы", "channels": "Каналы"}.get(kind, kind)
+        return {"mixed": "Смешанный", "groups": "Группы", "channels": "Каналы", "messages": "Тексты"}.get(kind, kind)
 
     def _count_items(self, content: str) -> int:
         return len([l.strip() for l in (content or "").splitlines() if l.strip()])
@@ -6153,6 +6154,7 @@ class BroadcastFrame(ctk.CTkFrame):
         self._cycle_campaign_accounts: list[str] = []
         self._cycle_targets = []
         self._cycle_template_by_name = {}
+        self._cycle_message_template_by_name = {}
 
         # Use a scrollable content area so that with many rules/campaigns/controls
         # everything remains visible and scrollable instead of being cut off (fixes "не все видно" and glitching on narrow/tall windows).
@@ -6291,16 +6293,27 @@ class BroadcastFrame(ctk.CTkFrame):
         ctk.CTkRadioButton(ms_row, text="Из Избранного", variable=self.c_message_source_var,
                            value="Избранное", command=self._toggle_cycle_text).pack(side="left")
 
-        ctk.CTkLabel(msg, text="Текст / шаблоны (по строкам):").grid(
-            row=1, column=0, padx=5, pady=3, sticky="nw")
-        self.c_message = ctk.CTkTextbox(msg, height=80)
-        self.c_message.grid(row=1, column=1, padx=5, pady=3, sticky="ew")
+        ctk.CTkLabel(msg, text="Текстовый шаблон:").grid(row=1, column=0, padx=5, pady=3, sticky="w")
+        self.c_message_template_var = ctk.StringVar(value="—")
+        self.c_message_template_menu = ctk.CTkOptionMenu(
+            msg,
+            variable=self.c_message_template_var,
+            values=["—"],
+            width=260,
+            command=self._cycle_on_message_template_change,
+        )
+        self.c_message_template_menu.grid(row=1, column=1, padx=5, pady=3, sticky="w")
 
-        ctk.CTkLabel(msg, text="Уникализация:").grid(row=2, column=0, padx=5, pady=3, sticky="w")
+        ctk.CTkLabel(msg, text="Текст / шаблоны (по строкам):").grid(
+            row=2, column=0, padx=5, pady=3, sticky="nw")
+        self.c_message = ctk.CTkTextbox(msg, height=80)
+        self.c_message.grid(row=2, column=1, padx=5, pady=3, sticky="ew")
+
+        ctk.CTkLabel(msg, text="Уникализация:").grid(row=3, column=0, padx=5, pady=3, sticky="w")
         self.c_unique_var = ctk.StringVar(value="Оригинал")
         ctk.CTkSegmentedButton(msg, values=["Оригинал", "Спинтакс", "Омоглифы", "AI"],
                                variable=self.c_unique_var).grid(
-            row=2, column=1, padx=5, pady=3, sticky="w")
+            row=3, column=1, padx=5, pady=3, sticky="w")
 
         btns = ctk.CTkFrame(content, fg_color="transparent")
         btns.pack(padx=10, pady=10, fill="x")
@@ -6424,17 +6437,43 @@ class BroadcastFrame(ctk.CTkFrame):
             self.c_message.configure(state="disabled")
         else:
             self.c_message.configure(state="normal")
+        if hasattr(self, "c_message_template_menu"):
+            if self.c_message_source_var.get() == "Шаблоны":
+                self.c_message_template_menu.configure(state="normal")
+            else:
+                self.c_message_template_menu.configure(state="disabled")
 
     def _refresh_cycle_templates(self):
         db = Database(self.app.config.db_path)
-        templates = [t for t in db.get_all_list_templates() if t.get("kind") in ("groups", "mixed")]
+        templates_all = db.get_all_list_templates()
         db.close()
+        templates = [t for t in templates_all if t.get("kind") in ("groups", "mixed")]
         self._cycle_template_by_name = {t["name"]: t for t in templates}
         values = list(self._cycle_template_by_name.keys()) or ["—"]
         current = self.c_template_var.get()
         self.c_template_menu.configure(values=values)
         if current not in values:
             self.c_template_var.set(values[0])
+        message_templates = [t for t in templates_all if t.get("kind") == "messages"]
+        self._cycle_message_template_by_name = {t["name"]: t for t in message_templates}
+        if hasattr(self, "c_message_template_menu"):
+            msg_values = list(self._cycle_message_template_by_name.keys()) or ["—"]
+            msg_current = self.c_message_template_var.get()
+            self.c_message_template_menu.configure(values=msg_values)
+            if msg_current not in msg_values:
+                self.c_message_template_var.set(msg_values[0])
+
+    def _cycle_on_message_template_change(self, name: str):
+        tpl = (getattr(self, "_cycle_message_template_by_name", {}) or {}).get(name)
+        if not tpl:
+            return
+        try:
+            self.c_message.configure(state="normal")
+            self.c_message.delete("1.0", "end")
+            self.c_message.insert("1.0", tpl.get("content") or "")
+            self._toggle_cycle_text()
+        except Exception:
+            pass
 
     def _refresh_cycle_campaigns(self):
         db = Database(self.app.config.db_path)
@@ -6505,6 +6544,13 @@ class BroadcastFrame(ctk.CTkFrame):
         return dict(self._busy_accounts)
 
     def _cycle_on_campaign_change(self, name: str):
+        old_name = (self._cycle_campaign_name or "").strip()
+        new_name = (name or "").strip()
+        if old_name and new_name and old_name != new_name:
+            try:
+                self._cycle_save_current_campaign_settings(old_name)
+            except Exception as e:
+                self.log.append(f"[Циклическая] [!] Не удалось сохранить настройки кампании '{old_name}': {e}")
         self._cycle_select_campaign(name)
 
     def _cycle_select_campaign(self, name: str):
@@ -6531,6 +6577,10 @@ class BroadcastFrame(ctk.CTkFrame):
             pass
 
     def _cycle_create_campaign(self):
+        try:
+            self._cycle_save_current_campaign_settings()
+        except Exception as e:
+            self.log.append(f"[Циклическая] [!] Не удалось сохранить текущую кампанию перед созданием новой: {e}")
         dlg = ctk.CTkInputDialog(text="Название кампании:", title="Создать кампанию")
         name = (dlg.get_input() or "").strip()
         if not name:
@@ -6544,7 +6594,14 @@ class BroadcastFrame(ctk.CTkFrame):
             db = Database(self.app.config.db_path)
             try:
                 campaign_id = db.get_or_create_cycle_campaign(name)
+                defaults = self._cycle_defaults()
                 run_settings = self._cycle_run_settings()
+                source_mode = self.c_message_source_var.get()
+                message_source = "saved" if source_mode == "Избранное" else ("templates" if source_mode == "Шаблоны" else "manual")
+                message_template_id = self._cycle_current_message_template_id() if message_source == "templates" else None
+                message_text = "" if message_source == "saved" else self.c_message.get("1.0", "end").strip()
+                if message_source == "templates" and message_template_id:
+                    message_text = self._cycle_current_message_template_content()
                 target_template_id = None
                 if self.c_targets_source_var.get() != "База":
                     tpl = self._cycle_template_by_name.get(self.c_template_var.get())
@@ -6554,9 +6611,8 @@ class BroadcastFrame(ctk.CTkFrame):
                     campaign_id,
                     targets_source="tasks" if self.c_targets_source_var.get() == "База" else "template",
                     template_id=target_template_id,
-                    message_source="saved" if self.c_message_source_var.get() == "Избранное"
-                    else ("templates" if self.c_message_source_var.get() == "Шаблоны" else "manual"),
-                    message_text=self.c_message.get("1.0", "end").strip(),
+                    message_source=message_source,
+                    message_text=message_text,
                     unique_mode=self.c_unique_var.get(),
                     enabled=False,
                     account_filter=self._get_cycle_account_filter(),
@@ -6564,6 +6620,13 @@ class BroadcastFrame(ctk.CTkFrame):
                     send_delay_min_seconds=int(run_settings["send_delay_min_seconds"]),
                     send_delay_max_seconds=int(run_settings["send_delay_max_seconds"]),
                     round_pause_seconds=int(run_settings["round_pause_seconds"]),
+                    message_template_id=message_template_id,
+                    default_hours_start=int(defaults["hours_start"]),
+                    default_hours_end=int(defaults["hours_end"]),
+                    default_interval_min_seconds=int(defaults["interval_min_seconds"]),
+                    default_interval_max_seconds=int(defaults["interval_max_seconds"]),
+                    default_min_new_messages=int(defaults["min_new_messages"]),
+                    default_fallback_hours=int(defaults["fallback_hours"]),
                 )
             finally:
                 db.close()
@@ -6589,6 +6652,10 @@ class BroadcastFrame(ctk.CTkFrame):
             return
         if not name:
             return
+        try:
+            self._cycle_save_current_campaign_settings(name)
+        except Exception as e:
+            self.log.append(f"[Циклическая] [!] Не удалось сохранить настройки перед переименованием: {e}")
         dlg = ctk.CTkInputDialog(text="Новое название кампании:", title="Переименовать кампанию")
         new_name = (dlg.get_input() or "").strip()
         if not new_name or new_name == name:
@@ -6792,6 +6859,74 @@ class BroadcastFrame(ctk.CTkFrame):
             "round_pause_seconds": rp,
             "rotate_after_n_sends": rotate_after_n_sends,
         }
+
+    @staticmethod
+    def _cycle_set_entry(entry, value):
+        entry.delete(0, "end")
+        entry.insert(0, str(value))
+
+    def _cycle_current_message_template_id(self) -> int | None:
+        tpl = (getattr(self, "_cycle_message_template_by_name", {}) or {}).get(
+            self.c_message_template_var.get()
+        )
+        if tpl and tpl.get("id") is not None:
+            return int(tpl["id"])
+        return None
+
+    def _cycle_current_message_template_content(self) -> str:
+        tpl = (getattr(self, "_cycle_message_template_by_name", {}) or {}).get(
+            self.c_message_template_var.get()
+        )
+        return (tpl.get("content") or "").strip() if tpl else ""
+
+    def _cycle_save_current_campaign_settings(self, campaign_name: str | None = None, enabled: bool | None = None):
+        name = (campaign_name or self._cycle_campaign_name or "").strip()
+        if not name:
+            return
+        db = Database(self.app.config.db_path)
+        try:
+            campaign_id = db.get_or_create_cycle_campaign(name)
+            camp = db.load_cycle_campaign(campaign_id) or {}
+            if enabled is None:
+                enabled = bool(int(camp.get("enabled", 0) or 0))
+
+            if self.c_targets_source_var.get() == "База":
+                targets_source = "tasks"
+                target_template_id = None
+            else:
+                targets_source = "template"
+                tpl = self._cycle_template_by_name.get(self.c_template_var.get())
+                target_template_id = int(tpl["id"]) if tpl and tpl.get("id") is not None else None
+
+            source_mode = self.c_message_source_var.get()
+            message_source = "saved" if source_mode == "Избранное" else ("templates" if source_mode == "Шаблоны" else "manual")
+            message_template_id = self._cycle_current_message_template_id() if message_source == "templates" else None
+            message_text = "" if message_source == "saved" else self.c_message.get("1.0", "end").strip()
+            defaults = self._cycle_defaults()
+            run_settings = self._cycle_run_settings()
+            db.update_cycle_campaign(
+                campaign_id,
+                targets_source=targets_source,
+                template_id=target_template_id,
+                message_source=message_source,
+                message_text=message_text,
+                unique_mode=self.c_unique_var.get(),
+                enabled=bool(enabled),
+                account_filter=self._get_cycle_account_filter(),
+                rotate_after_n_sends=int(run_settings.get("rotate_after_n_sends", 0)),
+                send_delay_min_seconds=int(run_settings["send_delay_min_seconds"]),
+                send_delay_max_seconds=int(run_settings["send_delay_max_seconds"]),
+                round_pause_seconds=int(run_settings["round_pause_seconds"]),
+                message_template_id=message_template_id,
+                default_hours_start=int(defaults["hours_start"]),
+                default_hours_end=int(defaults["hours_end"]),
+                default_interval_min_seconds=int(defaults["interval_min_seconds"]),
+                default_interval_max_seconds=int(defaults["interval_max_seconds"]),
+                default_min_new_messages=int(defaults["min_new_messages"]),
+                default_fallback_hours=int(defaults["fallback_hours"]),
+            )
+        finally:
+            db.close()
 
     def _cycle_set_status(self, text: str, color: str = "gray70"):
         try:
@@ -7342,9 +7477,36 @@ class BroadcastFrame(ctk.CTkFrame):
         try:
             campaign_id = db.get_or_create_cycle_campaign(self._cycle_campaign_name)
             camp = db.load_cycle_campaign(campaign_id) or {}
+            targets = db.get_cycle_targets(campaign_id)
         finally:
             db.close()
 
+        def _target_default(key: str, default: int) -> int:
+            target_key = key.replace("default_", "")
+            target_value = None
+            if targets:
+                try:
+                    target_value = int(targets[0].get(target_key, default) or default)
+                except Exception:
+                    target_value = None
+            if camp.get(key) is not None:
+                try:
+                    value = int(camp.get(key) or default)
+                    if target_value not in (None, default) and value == default:
+                        return int(target_value)
+                    return value
+                except Exception:
+                    return default
+            if target_value is not None:
+                return int(target_value)
+            return default
+
+        hours_start = max(0, min(23, _target_default("default_hours_start", 0)))
+        hours_end = max(0, min(23, _target_default("default_hours_end", 23)))
+        int_min = max(0, _target_default("default_interval_min_seconds", 0))
+        int_max = max(int_min, _target_default("default_interval_max_seconds", int_min))
+        min_new = max(0, _target_default("default_min_new_messages", 0))
+        fallback_hours = max(0, _target_default("default_fallback_hours", 0))
         smin = int(camp.get("send_delay_min_seconds", 30) or 30)
         smax = int(camp.get("send_delay_max_seconds", 90) or 90)
         rp = int(camp.get("round_pause_seconds", 0) or 0)
@@ -7355,15 +7517,16 @@ class BroadcastFrame(ctk.CTkFrame):
         if rp < 0:
             rp = 0
 
-        def _fill(entry, value: int):
-            if not entry.get().strip():
-                entry.insert(0, str(value))
-
-        _fill(self.c_send_delay_min, smin)
-        _fill(self.c_send_delay_max, smax)
-        _fill(self.c_round_pause, rp)
-
-        _fill(self.c_rotate_after_n, int(camp.get("rotate_after_n_sends", 0) or 0))
+        self._cycle_set_entry(self.c_hours_start, hours_start)
+        self._cycle_set_entry(self.c_hours_end, hours_end)
+        self._cycle_set_entry(self.c_int_min, int_min)
+        self._cycle_set_entry(self.c_int_max, int_max)
+        self._cycle_set_entry(self.c_min_new, min_new)
+        self._cycle_set_entry(self.c_fallback_hours, fallback_hours)
+        self._cycle_set_entry(self.c_send_delay_min, smin)
+        self._cycle_set_entry(self.c_send_delay_max, smax)
+        self._cycle_set_entry(self.c_round_pause, rp)
+        self._cycle_set_entry(self.c_rotate_after_n, int(camp.get("rotate_after_n_sends", 0) or 0))
 
         acc_filter = (camp.get("account_filter") or "").strip()
         if acc_filter:
@@ -7378,6 +7541,7 @@ class BroadcastFrame(ctk.CTkFrame):
             self.c_targets_source_var.set("Шаблон")
 
         template_id = int(camp.get("template_id", 0) or 0)
+        self.c_template_var.set("—")
         if template_id:
             for name, tpl in self._cycle_template_by_name.items():
                 if int(tpl.get("id", 0) or 0) == template_id:
@@ -7394,9 +7558,21 @@ class BroadcastFrame(ctk.CTkFrame):
 
         self.c_unique_var.set(str(camp.get("unique_mode", "") or "Оригинал"))
 
+        self.c_message_template_var.set("—")
+        message_template_id = int(camp.get("message_template_id", 0) or 0)
+        if message_template_id:
+            for name, tpl in self._cycle_message_template_by_name.items():
+                if int(tpl.get("id", 0) or 0) == message_template_id:
+                    self.c_message_template_var.set(name)
+                    break
+
         saved_text = str(camp.get("message_text", "") or "")
+        if message_source == "templates" and message_template_id:
+            tpl_text = self._cycle_current_message_template_content()
+            saved_text = tpl_text or saved_text
+        self.c_message.configure(state="normal")
+        self.c_message.delete("1.0", "end")
         if saved_text:
-            self.c_message.delete("1.0", "end")
             self.c_message.insert("1.0", saved_text)
 
         self._toggle_cycle_targets_source()
@@ -7593,6 +7769,15 @@ class BroadcastFrame(ctk.CTkFrame):
     def _start_cycle(self):
         running_campaign_name = (self._cycle_campaign_name or "").strip() or "CycleBroadcast"
         self._append_log(f"[Циклическая] [~] Попытка запуска кампании: '{running_campaign_name}'")
+        try:
+            self._cycle_save_current_campaign_settings(running_campaign_name)
+        except Exception as e:
+            self._cycle_reject_start(
+                f"Не удалось сохранить настройки кампании перед стартом: {e}",
+                "ошибка: сохранение",
+                "Старт не выполнен: настройки кампании не сохранены.",
+            )
+            return
         # Log id/name/target count/account count on single Start click (for manual verification)
         try:
             dblog = Database(self.app.config.db_path)
@@ -7659,6 +7844,10 @@ class BroadcastFrame(ctk.CTkFrame):
 
         source_mode = self.c_message_source_var.get()
         msg_text = self.c_message.get("1.0", "end").strip()
+        message_template_id = self._cycle_current_message_template_id() if source_mode == "Шаблоны" else None
+        message_template_name = self.c_message_template_var.get() if message_template_id else ""
+        if source_mode == "Шаблоны" and message_template_id:
+            msg_text = self._cycle_current_message_template_content()
         if source_mode != "Избранное" and not msg_text:
             if source_mode == "Шаблоны":
                 self._cycle_reject_start(
@@ -7731,6 +7920,7 @@ class BroadcastFrame(ctk.CTkFrame):
         template_name = self.c_template_var.get()
         message_source = source_mode
         unique_mode = self.c_unique_var.get()
+        defaults = self._cycle_defaults()
         run_settings = self._cycle_run_settings()
         send_delay_min_seconds = int(run_settings["send_delay_min_seconds"])
         send_delay_max_seconds = int(run_settings["send_delay_max_seconds"])
@@ -7803,7 +7993,8 @@ class BroadcastFrame(ctk.CTkFrame):
                     msg_preview = msg_preview[:120] + "…"
                 if message_source == "Шаблоны":
                     lines = [l.strip() for l in msg_text.splitlines() if l.strip()]
-                    self.log.append(f"  [i] Текст: шаблоны ({len(lines)} строк), уникализация={unique_mode}")
+                    tpl_note = f" ({message_template_name})" if message_template_name else ""
+                    self.log.append(f"  [i] Текст: шаблон{tpl_note}, строк={len(lines)}, уникализация={unique_mode}")
                     if msg_preview:
                         self.log.append(f"  [i] Превью: {msg_preview}")
                 elif message_source == "Избранное":
@@ -7884,6 +8075,13 @@ class BroadcastFrame(ctk.CTkFrame):
                     send_delay_min_seconds=send_delay_min_seconds,
                     send_delay_max_seconds=send_delay_max_seconds,
                     round_pause_seconds=round_pause_seconds,
+                    message_template_id=message_template_id if message_source == "Шаблоны" else None,
+                    default_hours_start=int(defaults["hours_start"]),
+                    default_hours_end=int(defaults["hours_end"]),
+                    default_interval_min_seconds=int(defaults["interval_min_seconds"]),
+                    default_interval_max_seconds=int(defaults["interval_max_seconds"]),
+                    default_min_new_messages=int(defaults["min_new_messages"]),
+                    default_fallback_hours=int(defaults["fallback_hours"]),
                 )
                 if stop_event.is_set():
                     try:
@@ -7901,7 +8099,6 @@ class BroadcastFrame(ctk.CTkFrame):
                     account_send_count = 0
                 acc_pos = 0
                 acc_pos_init_done = False
-                saved_cache: dict[str, list[str]] = {}
                 empty_saved_accounts: set[str] = set()
                 templates_cache = [l.strip() for l in msg_text.splitlines() if l.strip()]
                 first_loop_logged = False
@@ -8117,18 +8314,6 @@ class BroadcastFrame(ctk.CTkFrame):
                             latest_id = 0
 
                             acc = accounts[acc_pos % len(accounts)]
-                            if message_source == "Избранное" and acc.phone in empty_saved_accounts:
-                                _cycle_error(acc.phone, link, "empty_saved_messages", "empty Saved Messages")
-                                if len(empty_saved_accounts) >= len(accounts):
-                                    log_queue.put((
-                                        "cycle_log",
-                                        "[!] Кампания остановлена: у всех выбранных аккаунтов пустое Избранное. "
-                                        "Добавь текст в Saved Messages или выбери источник 'Вручную/Шаблоны'.",
-                                    ))
-                                    stop_event.set()
-                                _bump_state(acc_phone=acc.phone)
-                                acc_pos += 1
-                                continue
 
                             if rotate_after_n_sends > 0:
                                 if last_acc_phone and acc.phone != last_acc_phone:
@@ -8235,20 +8420,24 @@ class BroadcastFrame(ctk.CTkFrame):
                                     continue
 
                                 if message_source == "Избранное":
-                                    if acc.phone not in saved_cache or not saved_cache[acc.phone]:
-                                        saved = await _cycle_wait(
-                                            sender.get_saved_messages(limit=30),
-                                            f"{acc.phone}: чтение Избранного",
-                                            25,
-                                            acc.phone,
-                                            link,
-                                        )
-                                        saved_cache[acc.phone] = [s for s in (saved or []) if (s or "").strip()]
-                                    if not saved_cache.get(acc.phone):
+                                    saved = await _cycle_wait(
+                                        sender.get_saved_messages(limit=30),
+                                        f"{acc.phone}: чтение Избранного",
+                                        25,
+                                        acc.phone,
+                                        link,
+                                    )
+                                    saved_texts = [s for s in (saved or []) if (s or "").strip()]
+                                    log_queue.put((
+                                        "cycle_log",
+                                        f"[i] Кампания={running_campaign_name} | Аккаунт={acc.phone} | "
+                                        f"Источник=Избранное: {acc.phone}/Saved Messages | текстов={len(saved_texts)}",
+                                    ))
+                                    if not saved_texts:
                                         empty_saved_accounts.add(acc.phone)
                                         log_queue.put((
                                             "cycle_log",
-                                            f"[!] {acc.phone}: в Избранном нет текстовых сообщений. "
+                                            f"[!] Кампания={running_campaign_name} | {acc.phone}: в Избранном нет текстовых сообщений. "
                                             "Кампания не должна крутиться с пустым текстом.",
                                         ))
                                         _cycle_error(acc.phone, link, "empty_saved_messages", "empty Saved Messages")
@@ -8262,7 +8451,7 @@ class BroadcastFrame(ctk.CTkFrame):
                                         _bump_state(acc_phone=acc.phone)
                                         acc_pos += 1
                                         continue
-                                    raw = random.choice(saved_cache[acc.phone])
+                                    raw = random.choice(saved_texts)
                                 elif message_source == "Шаблоны":
                                     raw = random.choice(templates_cache) if templates_cache else msg_text
                                 else:
@@ -8277,6 +8466,20 @@ class BroadcastFrame(ctk.CTkFrame):
                                     continue
 
                                 final_text = self._apply_unique(raw, unique_mode)
+                                preview50 = final_text.replace("\n", " ").strip()
+                                if len(preview50) > 50:
+                                    preview50 = preview50[:50] + "…"
+                                if message_source == "Избранное":
+                                    source_label = f"Избранное: {acc.phone}/Saved Messages"
+                                elif message_source == "Шаблоны":
+                                    source_label = f"Шаблон текста: {message_template_name}" if message_template_name else "Шаблоны: строки поля"
+                                else:
+                                    source_label = "Вручную"
+                                log_queue.put((
+                                    "cycle_log",
+                                    f"[i] Перед отправкой | campaign={running_campaign_name} | account={acc.phone} | "
+                                    f"target={link} | source={source_label} | text='{preview50}'",
+                                ))
                                 if dry_run:
                                     status = "dry_run"
                                     raw_status = "dry_run"

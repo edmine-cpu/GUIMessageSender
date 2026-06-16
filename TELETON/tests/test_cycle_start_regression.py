@@ -160,3 +160,43 @@ def test_cycle_worker_emits_progress_for_attempt_and_result():
     assert 'phase="attempt"' in start
     assert "last_success_at=now.isoformat" in start
     assert "last_error=(error_detail or raw_status or status)" in start
+
+
+def test_cycle_campaign_switch_saves_previous_and_loads_selected():
+    src = _load_gui_source()
+    methods = _find_class_methods(src, "BroadcastFrame")
+    on_change = methods.get("_cycle_on_campaign_change", "")
+    select = methods.get("_cycle_select_campaign", "")
+    assert "_cycle_save_current_campaign_settings(old_name)" in on_change
+    assert "_cycle_select_campaign(name)" in on_change
+    assert "_cycle_load_campaign_settings()" in select
+
+
+def test_cycle_load_campaign_settings_replaces_stale_widget_values():
+    src = _load_gui_source()
+    methods = _find_class_methods(src, "BroadcastFrame")
+    load = methods.get("_cycle_load_campaign_settings", "")
+    assert "_cycle_set_entry(" in load
+    assert "def _fill" not in load
+    assert "if not entry.get().strip()" not in load
+    assert 'self.c_message.delete("1.0", "end")' in load
+
+
+def test_cycle_start_saves_text_template_id_before_worker():
+    src = _load_gui_source()
+    methods = _find_class_methods(src, "BroadcastFrame")
+    start = methods.get("_start_cycle", "")
+    assert "_cycle_save_current_campaign_settings(running_campaign_name)" in start
+    assert "message_template_id = self._cycle_current_message_template_id()" in start
+    assert "message_template_id=message_template_id" in start
+
+
+def test_cycle_saved_messages_are_read_fresh_and_logged_before_send():
+    src = _load_gui_source()
+    methods = _find_class_methods(src, "BroadcastFrame")
+    start = methods.get("_start_cycle", "")
+    assert "saved_cache" not in start
+    assert "sender.get_saved_messages(limit=30)" in start
+    assert "Источник=Избранное" in start
+    assert "Перед отправкой | campaign=" in start
+    assert "preview50" in start
