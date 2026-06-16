@@ -50,6 +50,26 @@ def _user_status_to_str(status) -> str:
     return "unknown"
 
 
+def _normalize_chat_target(group: str) -> str:
+    """Convert public t.me links to a Telethon-friendly @username target."""
+    target = (group or "").strip()
+    m = re.match(r"(?i)^(?:https?://)?(?:t\.me|telegram\.me)/([^/?#]+)", target)
+    if not m:
+        return target
+    slug = m.group(1)
+    if slug.startswith("+") or slug.lower() in ("joinchat", "c", "s"):
+        return target
+    return f"@{slug}"
+
+
+def _short_error(e: Exception, limit: int = 180) -> str:
+    msg = str(e).strip() or e.__class__.__name__
+    msg = " ".join(msg.split())
+    if len(msg) > limit:
+        msg = msg[:limit - 1] + "…"
+    return f"{e.__class__.__name__}: {msg}"
+
+
 class GroupParser:
     def __init__(
         self,
@@ -614,6 +634,7 @@ async def join_group(client: TelegramClient, group: str) -> str:
     m = re.search(r"t\.me/(?:joinchat/|\+)([a-zA-Z0-9_-]+)", group)
     if m:
         invite_hash = m.group(1)
+    target = _normalize_chat_target(group)
 
     try:
         if invite_hash:
@@ -626,7 +647,7 @@ async def join_group(client: TelegramClient, group: str) -> str:
                 print(f"  [~] Заявка отправлена: {group}")
                 return "join_request"
         else:
-            await client(JoinChannelRequest(group))
+            await client(JoinChannelRequest(target))
             print(f"  [+] Вступил: {group}")
             return "joined"
 
@@ -655,8 +676,9 @@ async def join_group(client: TelegramClient, group: str) -> str:
         if "request to join" in err or "join_request" in err:
             print(f"  [~] Заявка отправлена: {group}")
             return "join_request"
-        print(f"  [-] Ошибка вступления в {group}: {e}")
-        return "error"
+        detail = _short_error(e)
+        print(f"  [-] Ошибка вступления в {group}: {detail}")
+        return f"error:{detail}"
 
 
 def _iso(dt: datetime) -> str:
@@ -685,7 +707,7 @@ async def inspect_chat_access(client: TelegramClient, group: str) -> tuple[str, 
             print(f"  [DRY] Invite-ссылка валидна: {group} (в live была бы попытка вступления)")
             return "ok", "dry_run_would_join", ""
 
-        await client.get_entity(group)
+        await client.get_entity(_normalize_chat_target(group))
         print(f"  [DRY] Чат резолвится без вступления: {group}")
         return "ok", "dry_run_resolved", ""
 
@@ -702,8 +724,9 @@ async def inspect_chat_access(client: TelegramClient, group: str) -> tuple[str, 
         print(f"  [DRY] FloodWait {e.seconds}s при проверке доступа к {group}")
         return "waiting", "flood_wait", _iso(datetime.now() + timedelta(minutes=30))
     except Exception as e:
-        print(f"  [DRY] Не удалось проверить доступ к {group}: {e}")
-        return "error", "error", _iso(datetime.now() + timedelta(hours=1))
+        detail = _short_error(e)
+        print(f"  [DRY] Не удалось проверить доступ к {group}: {detail}")
+        return "error", f"error:{detail}", _iso(datetime.now() + timedelta(hours=1))
 
 
 async def ensure_chat_access(client: TelegramClient, group: str, dry_run: bool = False) -> tuple[str, str, str]:
