@@ -642,6 +642,8 @@ class AdsScheduler:
                 media_path=ad.media_path or "",
                 account_phone=self.account_phone,
                 ad_id=ad.id,
+                button_text=ad.button_text,
+                button_url=ad.button_url,
             )
 
             # Логируем результат

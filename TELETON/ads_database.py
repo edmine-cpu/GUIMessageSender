@@ -54,6 +54,8 @@ class AdsDB:
                 text_base TEXT NOT NULL DEFAULT '',
                 media_path TEXT DEFAULT '',
                 category TEXT DEFAULT '',
+                button_text TEXT DEFAULT '',
+                button_url TEXT DEFAULT '',
                 active INTEGER NOT NULL DEFAULT 1,
                 account_phone TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT '',
@@ -142,6 +144,7 @@ class AdsDB:
         # Миграция схемы для существующих БД
         self._migrate_schema_v2()
         self._migrate_schema_v3()
+        self._migrate_schema_v4()
 
     def _migrate_schema_v2(self):
         """Миграция: добавляет next_allowed_at и interval_minutes_max в
@@ -184,6 +187,24 @@ class AdsDB:
         """)
         self.conn.commit()
 
+    def _migrate_schema_v4(self):
+        """Миграция: добавляет URL-кнопку к объявлениям.
+        Поля опциональны, старые объявления остаются без кнопки."""
+        cur = self.conn.execute("PRAGMA table_info(ads)")
+        existing_cols = {row["name"] for row in cur.fetchall()}
+        if "button_text" not in existing_cols:
+            self.conn.execute(
+                "ALTER TABLE ads "
+                "ADD COLUMN button_text TEXT DEFAULT ''"
+            )
+            self.conn.commit()
+        if "button_url" not in existing_cols:
+            self.conn.execute(
+                "ALTER TABLE ads "
+                "ADD COLUMN button_url TEXT DEFAULT ''"
+            )
+            self.conn.commit()
+
     # =========================================================
     # Ads — объявления
     # =========================================================
@@ -191,11 +212,13 @@ class AdsDB:
     def add_ad(self, ad: Ad) -> int:
         now = _now()
         cur = self.conn.execute("""
-            INSERT INTO ads (title, text_base, media_path, category, active,
-                             account_phone, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO ads (title, text_base, media_path, category,
+                             button_text, button_url, active, account_phone,
+                             created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (ad.title, ad.text_base, ad.media_path, ad.category,
-              int(ad.active), ad.account_phone, now, now))
+              ad.button_text, ad.button_url, int(ad.active), ad.account_phone,
+              now, now))
         self.conn.commit()
         return cur.lastrowid
 
@@ -219,10 +242,12 @@ class AdsDB:
             raise ValueError("Ad.id is required for update")
         self.conn.execute("""
             UPDATE ads SET title=?, text_base=?, media_path=?, category=?,
-                           active=?, account_phone=?, updated_at=?
+                           button_text=?, button_url=?, active=?,
+                           account_phone=?, updated_at=?
             WHERE id=?
         """, (ad.title, ad.text_base, ad.media_path, ad.category,
-              int(ad.active), ad.account_phone, _now(), ad.id))
+              ad.button_text, ad.button_url, int(ad.active),
+              ad.account_phone, _now(), ad.id))
         self.conn.commit()
 
     def delete_ad(self, ad_id: int):
@@ -231,12 +256,20 @@ class AdsDB:
 
     @staticmethod
     def _row_to_ad(row) -> Ad:
+        def _row_value(name: str, default=""):
+            try:
+                return row[name]
+            except (KeyError, IndexError):
+                return default
+
         return Ad(
             id=row["id"],
             title=row["title"],
             text_base=row["text_base"],
             media_path=row["media_path"],
             category=row["category"],
+            button_text=_row_value("button_text"),
+            button_url=_row_value("button_url"),
             active=bool(row["active"]),
             account_phone=row["account_phone"],
             created_at=row["created_at"],

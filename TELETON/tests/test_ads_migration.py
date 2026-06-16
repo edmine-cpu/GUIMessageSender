@@ -13,7 +13,7 @@ import tempfile
 import pytest
 
 from ads_database import AdsDB
-from ads_models import GroupTarget, SchedulerSettings, GROUP_STATUS_ACTIVE
+from ads_models import Ad, GroupTarget, SchedulerSettings, GROUP_STATUS_ACTIVE
 
 
 @pytest.fixture
@@ -198,6 +198,113 @@ class TestGroupCRUDWithNextAllowedAt:
             ).fetchone()
             g = AdsDB._row_to_group(row)
             assert g.next_allowed_at == ""  # пустая строка, не None
+        finally:
+            db.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Миграция и CRUD для кнопки объявления
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestAdButtonColumns:
+    def test_fresh_db_has_ad_button_columns(self, tmp_db_path):
+        db = AdsDB(tmp_db_path)
+        try:
+            cols = {row["name"] for row in
+                    db.conn.execute("PRAGMA table_info(ads)").fetchall()}
+            assert "button_text" in cols
+            assert "button_url" in cols
+        finally:
+            db.close()
+
+    def test_existing_ads_table_adds_button_columns_and_preserves_data(self, tmp_db_path):
+        conn = sqlite3.connect(tmp_db_path)
+        conn.execute("""
+            CREATE TABLE ads (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL DEFAULT '',
+                text_base TEXT NOT NULL DEFAULT '',
+                media_path TEXT DEFAULT '',
+                category TEXT DEFAULT '',
+                active INTEGER NOT NULL DEFAULT 1,
+                account_phone TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+        """)
+        conn.execute("""
+            INSERT INTO ads (title, text_base, account_phone, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, ("Legacy", "hello", "+100", "2020-01-01T00:00:00", "2020-01-01T00:00:00"))
+        conn.commit()
+        conn.close()
+
+        db = AdsDB(tmp_db_path)
+        try:
+            cols = {row["name"] for row in
+                    db.conn.execute("PRAGMA table_info(ads)").fetchall()}
+            assert "button_text" in cols
+            assert "button_url" in cols
+            ad = db.get_all_ads()[0]
+            assert ad.title == "Legacy"
+            assert ad.button_text == ""
+            assert ad.button_url == ""
+        finally:
+            db.close()
+
+    def test_ad_button_migration_is_idempotent(self, tmp_db_path):
+        db1 = AdsDB(tmp_db_path)
+        db1.close()
+        db2 = AdsDB(tmp_db_path)
+        try:
+            cols = {row["name"] for row in
+                    db2.conn.execute("PRAGMA table_info(ads)").fetchall()}
+            assert "button_text" in cols
+            assert "button_url" in cols
+        finally:
+            db2.close()
+
+    def test_add_ad_stores_button_fields(self, tmp_db_path):
+        db = AdsDB(tmp_db_path)
+        try:
+            ad_id = db.add_ad(Ad(
+                title="With button",
+                text_base="hello",
+                button_text="Написать",
+                button_url="https://t.me/contact",
+            ))
+            fetched = db.get_ad(ad_id)
+            assert fetched.button_text == "Написать"
+            assert fetched.button_url == "https://t.me/contact"
+        finally:
+            db.close()
+
+    def test_update_ad_updates_button_fields(self, tmp_db_path):
+        db = AdsDB(tmp_db_path)
+        try:
+            ad_id = db.add_ad(Ad(title="A", text_base="hello"))
+            ad = db.get_ad(ad_id)
+            ad.button_text = "Связаться"
+            ad.button_url = "https://example.com"
+            db.update_ad(ad)
+            fetched = db.get_ad(ad_id)
+            assert fetched.button_text == "Связаться"
+            assert fetched.button_url == "https://example.com"
+        finally:
+            db.close()
+
+    def test_row_to_ad_handles_missing_button_columns(self, tmp_db_path):
+        db = AdsDB(tmp_db_path)
+        try:
+            ad_id = db.add_ad(Ad(title="Subset", text_base="hello"))
+            row = db.conn.execute("""
+                SELECT id, title, text_base, media_path, category, active,
+                       account_phone, created_at, updated_at
+                FROM ads WHERE id=?
+            """, (ad_id,)).fetchone()
+            ad = AdsDB._row_to_ad(row)
+            assert ad.button_text == ""
+            assert ad.button_url == ""
         finally:
             db.close()
 

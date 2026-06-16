@@ -549,16 +549,34 @@ class AdDialog(ctk.CTkToplevel):
         self.e_category = ctk.CTkEntry(form, placeholder_text="авто, продажа")
         self.e_category.grid(row=5, column=1, padx=5, pady=4, sticky="ew")
 
+        lbl("Кнопка:", 6)
+        button_frame = ctk.CTkFrame(form, fg_color="transparent")
+        button_frame.grid(row=6, column=1, padx=5, pady=4, sticky="ew")
+        button_frame.grid_columnconfigure(0, weight=1)
+        button_frame.grid_columnconfigure(1, weight=1)
+        self.e_button_text = ctk.CTkEntry(
+            button_frame, placeholder_text="Написать")
+        self.e_button_text.grid(row=0, column=0, padx=(0, 5), sticky="ew")
+        self.e_button_url = ctk.CTkEntry(
+            button_frame, placeholder_text="@username, t.me/chat или https://...")
+        self.e_button_url.grid(row=0, column=1, padx=(5, 0), sticky="ew")
+        ctk.CTkLabel(
+            button_frame,
+            text="Необязательно: текст кнопки + ссылка, куда она ведёт",
+            text_color="gray60",
+            font=ctk.CTkFont(size=11),
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(2, 0))
+
         # Активно
         self.active_var = ctk.BooleanVar(value=True)
         ctk.CTkCheckBox(form, text="Активно (публиковать)",
                          variable=self.active_var).grid(
-            row=6, column=1, padx=5, pady=4, sticky="w")
+            row=7, column=1, padx=5, pady=4, sticky="w")
 
         # Выбор групп
-        lbl("Группы для публикации:", 7)
+        lbl("Группы для публикации:", 8)
         self.groups_frame = ctk.CTkScrollableFrame(form, height=120)
-        self.groups_frame.grid(row=7, column=1, padx=5, pady=4, sticky="ew")
+        self.groups_frame.grid(row=8, column=1, padx=5, pady=4, sticky="ew")
         self._load_groups_list()
 
         # Кнопки
@@ -594,6 +612,10 @@ class AdDialog(ctk.CTkToplevel):
             self.e_media.insert(0, ad.media_path)
         if ad.category:
             self.e_category.insert(0, ad.category)
+        if ad.button_text:
+            self.e_button_text.insert(0, ad.button_text)
+        if ad.button_url:
+            self.e_button_url.insert(0, ad.button_url)
         self.active_var.set(ad.active)
         self.acc_var.set(ad.account_phone)
         # Загружаем выбранные группы
@@ -631,12 +653,30 @@ class AdDialog(ctk.CTkToplevel):
             ctk.CTkLabel(self, text="Текст объявления обязателен",
                           text_color="red").pack()
             return
+        button_text = self.e_button_text.get().strip()
+        button_url = self.e_button_url.get().strip()
+        if bool(button_text) != bool(button_url):
+            ctk.CTkLabel(
+                self,
+                text="Для кнопки нужны и название, и ссылка",
+                text_color="red").pack()
+            return
+        if button_url:
+            try:
+                from ads_publisher import normalize_button_url
+                button_url = normalize_button_url(button_url)
+            except ValueError as e:
+                ctk.CTkLabel(self, text=f"Некорректная ссылка кнопки: {e}",
+                              text_color="red").pack()
+                return
         ad = Ad(
             id=self.ad.id if self.ad else None,
             title=title,
             text_base=text,
             media_path=self.e_media.get().strip(),
             category=self.e_category.get().strip(),
+            button_text=button_text,
+            button_url=button_url,
             active=self.active_var.get(),
             account_phone=self.acc_var.get(),
         )
@@ -1009,7 +1049,7 @@ class AdsTab(ctk.CTkFrame):
 
         # Таблица
         self.table = ScrollableTable(self, columns=[
-            "Название", "Аккаунт", "Категория", "Активно", "Групп", "Медиа"])
+            "Название", "Аккаунт", "Категория", "Активно", "Групп", "Медиа", "Кнопка"])
         self.table.pack(padx=10, pady=5, fill="both", expand=True)
 
         # Лог
@@ -1031,6 +1071,7 @@ class AdsTab(ctk.CTkFrame):
                 "Да" if ad.active else "Нет",
                 len(groups),
                 "✓" if ad.media_path and os.path.exists(ad.media_path) else "—",
+                "Да" if (ad.button_text and ad.button_url) else "—",
             ))
         db.close()
         self.table.set_data(rows)
@@ -1848,6 +1889,8 @@ class QuickLaunchTab(ctk.CTkFrame):
         text = (adaptation.text if adaptation else ad.text_base) or ""
         head = f"Группа: {g.link if g else gid}\n"
         head += f"Медиа: {'да' if (ad.media_path and os.path.exists(ad.media_path)) else 'нет'}\n\n"
+        if ad.button_text and ad.button_url:
+            head += f"Кнопка: {ad.button_text} → {ad.button_url}\n\n"
         self.preview_box.insert("1.0", head + text)
         self.preview_box.configure(state="disabled")
 
@@ -1899,6 +1942,8 @@ class QuickLaunchTab(ctk.CTkFrame):
                         text_base=base_ad.text_base,
                         media_path=base_ad.media_path,
                         category=base_ad.category,
+                        button_text=base_ad.button_text,
+                        button_url=base_ad.button_url,
                         active=True,
                         account_phone=p,
                     )

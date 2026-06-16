@@ -42,6 +42,8 @@ class Ad:
     text_base: str = ""                # базовый текст объявления
     media_path: str = ""               # путь к фото/видео, пусто если без медиа
     category: str = ""                 # категория/теги через запятую (для матчинга с группами)
+    button_text: str = ""              # текст inline-кнопки под объявлением
+    button_url: str = ""               # URL, куда ведёт inline-кнопка
     active: bool = True                # 1 — публикуется, 0 — на паузе
     account_phone: str = ""            # с какого аккаунта публикуем
     created_at: str = ""

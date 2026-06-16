@@ -116,6 +116,37 @@ def _message_id_or_none(msg) -> Optional[int]:
         return None
 
 
+def normalize_button_url(raw_url: str) -> str:
+    """Normalize user-entered ad button target into a Telegram URL button URL."""
+    url = (raw_url or "").strip()
+    if not url:
+        return ""
+    if any(ch.isspace() for ch in url):
+        raise ValueError("button URL must not contain spaces")
+    lowered = url.lower()
+    if url.startswith("@") and len(url) > 1:
+        return f"https://t.me/{url[1:]}"
+    if lowered.startswith("t.me/"):
+        return f"https://{url}"
+    if lowered.startswith("telegram.me/"):
+        return f"https://t.me/{url[len('telegram.me/'):]}"
+    if lowered.startswith(("http://", "https://", "tg://")):
+        return url
+    raise ValueError("button URL must be @username, t.me/..., http(s)://..., or tg://...")
+
+
+def _build_url_button(button_text: str, button_url: str):
+    text = (button_text or "").strip()
+    url = (button_url or "").strip()
+    if not text and not url:
+        return None
+    if not text or not url:
+        raise ValueError("button text and URL must be filled together")
+
+    from telethon import Button
+    return Button.url(text, normalize_button_url(url))
+
+
 async def publish_to_group(
     client,
     group: GroupTarget,
@@ -123,6 +154,8 @@ async def publish_to_group(
     media_path: str = "",
     account_phone: str = "",
     ad_id: int = 0,
+    button_text: str = "",
+    button_url: str = "",
 ) -> PublicationResult:
     """
     Опубликовать текст (+ медиа) в группу.
@@ -134,6 +167,8 @@ async def publish_to_group(
         media_path    — путь к файлу (пусто = без медиа)
         account_phone — для лога
         ad_id         — для лога
+        button_text   — текст inline-кнопки (опционально)
+        button_url    — куда ведёт inline-кнопка (опционально)
 
     Возвращает PublicationResult.
     """
@@ -155,16 +190,37 @@ async def publish_to_group(
     target = group.link
 
     try:
+        try:
+            button = _build_url_button(button_text, button_url)
+        except ValueError as e:
+            return PublicationResult(
+                status=PUB_STATUS_ERROR,
+                error_text=str(e),
+                retry_after=_retry_after_hours(1),
+            )
+
         if media_path and os.path.exists(media_path):
-            msg = await asyncio.wait_for(
-                client.send_file(target, media_path, caption=text),
-                timeout=30.0,
-            )
+            if button:
+                msg = await asyncio.wait_for(
+                    client.send_file(target, media_path, caption=text, buttons=button),
+                    timeout=30.0,
+                )
+            else:
+                msg = await asyncio.wait_for(
+                    client.send_file(target, media_path, caption=text),
+                    timeout=30.0,
+                )
         else:
-            msg = await asyncio.wait_for(
-                client.send_message(target, text),
-                timeout=30.0,
-            )
+            if button:
+                msg = await asyncio.wait_for(
+                    client.send_message(target, text, buttons=button),
+                    timeout=30.0,
+                )
+            else:
+                msg = await asyncio.wait_for(
+                    client.send_message(target, text),
+                    timeout=30.0,
+                )
 
         message_id = _message_id_or_none(msg)
         if message_id is None:
