@@ -5217,11 +5217,16 @@ class ParsingFrame(ctk.CTkFrame):
             if ai_provider not in ("openai", "groq"):
                 self.log.append(f"[!] Неизвестный AI-провайдер: {ai_provider!r}. Доступны: openai, groq")
                 return
-            if ai_provider == "openai" and not self.app.config.openai_api_key:
-                self.log.append("[!] Не задан OpenAI API Key. Укажите в настройках")
-                return
-            if ai_provider == "groq" and not getattr(self.app.config, "groq_api_key", ""):
-                self.log.append("[!] Не задан Groq API Key. Укажите в настройках")
+            provider_label = "OpenAI" if ai_provider == "openai" else "Groq"
+            api_key = (
+                self.app.config.openai_api_key
+                if ai_provider == "openai"
+                else getattr(self.app.config, "groq_api_key", "")
+            )
+            if not api_key:
+                self.log.append(
+                    f"[!] AI-фильтр не запущен: нет {provider_label} API Key. Укажите ключ в Настройках."
+                )
                 return
             try:
                 from ads_database import AdsDB
@@ -5564,7 +5569,7 @@ class AudiencesFrame(ctk.CTkFrame):
         self._table_widgets.clear()
 
         # Заголовки
-        headers = ["Группа", "Тип", "Кол-во", "Дата", "", ""]
+        headers = ["Группа", "Тип", "Кол-во", "Дата", "", "", "", ""]
         header_widgets = []
         for col, text in enumerate(headers):
             lbl = ctk.CTkLabel(self.table_frame, text=text,
@@ -5603,14 +5608,25 @@ class AudiencesFrame(ctk.CTkFrame):
                 command=lambda a=aud: self._show_dm_panel(a))
             dm_btn.grid(row=row, column=5, padx=2, pady=1)
 
-            row_widgets = [group_lbl, type_lbl, count_lbl, date_lbl, csv_btn, dm_btn]
+            delete_btn = ctk.CTkButton(
+                self.table_frame,
+                text="Удалить",
+                width=70,
+                height=24,
+                fg_color="firebrick",
+                hover_color="darkred",
+                command=lambda a=aud: self._delete_audience(a),
+            )
+            delete_btn.grid(row=row, column=6, padx=2, pady=1)
+
+            row_widgets = [group_lbl, type_lbl, count_lbl, date_lbl, csv_btn, dm_btn, delete_btn]
 
             # Кнопка "Упомянуть" только для аудиторий типа "users"
             if aud["audience_type"] == "users":
                 mention_btn = ctk.CTkButton(
                     self.table_frame, text="Упомянуть", width=70, height=24,
                     command=lambda a=aud: self._go_to_mention(a))
-                mention_btn.grid(row=row, column=6, padx=2, pady=1)
+                mention_btn.grid(row=row, column=7, padx=2, pady=1)
                 row_widgets.append(mention_btn)
 
             self._table_widgets.append(row_widgets)
@@ -5627,20 +5643,73 @@ class AudiencesFrame(ctk.CTkFrame):
             return
 
         db = Database(self.app.config.db_path)
-        members = db.get_audience_members(
-            audience["group_source"], audience["audience_type"])
-        db.close()
+        try:
+            if audience["audience_type"] == "matched":
+                rows = db.get_matched_posts_context(audience["group_source"])
+            else:
+                rows = db.get_audience_members(
+                    audience["group_source"], audience["audience_type"])
+        finally:
+            db.close()
 
         with open(path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow(["user_id", "username", "first_name", "last_name"])
-            for m in members:
-                u = (m.get("username") or "").strip()
-                if u and not u.startswith("@"):
-                    u = "@" + u
-                writer.writerow([m["user_id"], u, m["first_name"], m["last_name"]])
+            if audience["audience_type"] == "matched":
+                writer.writerow([
+                    "user_id",
+                    "username",
+                    "source_chat",
+                    "message_date",
+                    "message_link",
+                    "message_text",
+                    "match_mode",
+                    "matched_keywords",
+                    "ai_reason",
+                ])
+                for row in rows:
+                    u = (row.get("username") or "").strip()
+                    if u and not u.startswith("@"):
+                        u = "@" + u
+                    writer.writerow([
+                        row.get("user_id", ""),
+                        u,
+                        row.get("source_chat", ""),
+                        row.get("message_date", ""),
+                        row.get("message_link", ""),
+                        row.get("message_text", ""),
+                        row.get("match_mode", ""),
+                        row.get("matched_keywords", ""),
+                        row.get("ai_reason", ""),
+                    ])
+            else:
+                writer.writerow(["user_id", "username", "first_name", "last_name"])
+                for row in rows:
+                    u = (row.get("username") or "").strip()
+                    if u and not u.startswith("@"):
+                        u = "@" + u
+                    writer.writerow([row["user_id"], u, row["first_name"], row["last_name"]])
 
-        self.log.append(f"[+] Экспорт CSV: {len(members)} записей → {path}")
+        self.log.append(f"[+] Экспорт CSV: {len(rows)} записей → {path}")
+
+    def _delete_audience(self, audience: dict):
+        group_source = audience.get("group_source", "")
+        audience_type = audience.get("audience_type", "")
+        count = int(audience.get("count", 0) or 0)
+        ok = messagebox.askyesno(
+            "Удалить аудиторию",
+            f"Удалить аудиторию '{group_source}' ({audience_type}, {count} записей)?",
+        )
+        if not ok:
+            return
+
+        db = Database(self.app.config.db_path)
+        try:
+            deleted = db.delete_audience(group_source, audience_type)
+        finally:
+            db.close()
+
+        self.log.append(f"[+] Удалена аудитория: {group_source} ({audience_type}), записей: {deleted}")
+        self._refresh_table()
 
     # --- Импорт CSV ---
 
