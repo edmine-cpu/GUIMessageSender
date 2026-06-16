@@ -137,3 +137,28 @@ class TestConnectAuthKeyErrors:
         assert connected is False
         assert restored.status == ACCOUNT_STATUS_NEEDS_REAUTH
         assert "AuthKeyDuplicatedError" in restored.last_status_change
+
+    @pytest.mark.asyncio
+    async def test_database_locked_does_not_mark_needs_reauth_or_increment_failures(self, db):
+        from sender import TelegramSender
+        from config import Config
+
+        acc = Account(phone="+79001234568", api_id=123, api_hash="h")
+        db.add_account(acc)
+
+        with patch("sender.TelegramClient") as MockClient:
+            MockClient.return_value = MagicMock()
+            sender = TelegramSender(acc, Config(), db)
+
+            async def fake_raw_connect():
+                return "database_locked"
+
+            sender._raw_connect_with_retry = fake_raw_connect
+            connected = await sender.connect()
+
+        restored = next(a for a in db.get_all_accounts() if a.phone == acc.phone)
+        assert connected is False
+        assert restored.status == ACCOUNT_STATUS_ACTIVE
+        assert restored.connect_fail_count == 0
+        assert "database_locked" in restored.last_error_text
+        assert sender.last_connect_error_code == "database_locked"

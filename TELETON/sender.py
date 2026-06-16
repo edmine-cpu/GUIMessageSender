@@ -50,6 +50,8 @@ class TelegramSender:
         self.sent_count = account.sent_today
         self._session_lock = None
         self._session_lock_acquired = False
+        self.last_connect_error_code = ""
+        self.last_connect_error_message = ""
 
     _locks_guard = threading.Lock()
     _account_locks: dict[str, threading.Lock] = {}
@@ -98,6 +100,41 @@ class TelegramSender:
             self.release_account_session(self._session_lock)
         self._session_lock = None
         self._session_lock_acquired = False
+
+    def _remember_connect_problem(self, code: str, message: str):
+        self.last_connect_error_code = (code or "").strip()
+        self.last_connect_error_message = (message or "").strip()
+
+    def _record_connect_problem_without_status_change(self, code: str, message: str):
+        self._remember_connect_problem(code, message)
+        try:
+            self.db.record_connect_problem(self.account.phone, f"{code}: {message}")
+        except Exception:
+            pass
+
+    @staticmethod
+    def _locked_connect_code(error_text: str) -> str:
+        text = (error_text or "").lower()
+        if "database is locked" in text or "database table is locked" in text:
+            return "database_locked"
+        if "locked" in text:
+            return "session_locked"
+        return ""
+
+    @staticmethod
+    def connect_problem_hint(code: str) -> str:
+        code = (code or "").strip()
+        if code in ("session_locked", "database_locked", "in_app_session_busy"):
+            return (
+                "Файл сессии или БД занят другим процессом/операцией. "
+                "Остановите параллельные операции или закройте Telegram Desktop и запустите снова."
+            )
+        if code == "needs_reauth":
+            return (
+                "Сессия устарела или отозвана. "
+                "Переимпортируйте TData/.session для этого аккаунта."
+            )
+        return ""
 
     def _create_client(self) -> TelegramClient:
         """Создание клиента с учётом api_id/device из БД.
@@ -213,7 +250,8 @@ class TelegramSender:
                 await asyncio.wait_for(self.client.connect(), timeout=self._CONNECT_TIMEOUT_SECONDS)
                 return "ok"
             except sqlite3.OperationalError as e:
-                if "locked" in str(e).lower() and attempt < 3:
+                locked_code = self._locked_connect_code(str(e))
+                if locked_code and attempt < 3:
                     print(f"  [!] Сессия заблокирована, попытка {attempt}/3 — жду 3с...")
                     try:
                         await asyncio.wait_for(self.client.disconnect(), timeout=10.0)
@@ -221,6 +259,9 @@ class TelegramSender:
                         pass
                     self.client = self._create_client()
                     await asyncio.sleep(3.0)
+                elif locked_code:
+                    print(f"  [-] Сессия/БД занята {self.account.phone}: {e}")
+                    return locked_code
                 else:
                     print(f"  [-] Ошибка сессии {self.account.phone}: {e}")
                     return "error"
@@ -242,20 +283,30 @@ class TelegramSender:
         Возвращает True/False для обратной совместимости с существующим кодом.
         """
         if not self._try_acquire_session_lock():
+            message = "Аккаунт уже используется другой операцией внутри приложения"
+            self._record_connect_problem_without_status_change("in_app_session_busy", message)
             return False
         # 1. Низкоуровневое подключение
         connect_result = await self._raw_connect_with_retry()
+        if connect_result in ("session_locked", "database_locked"):
+            message = self.connect_problem_hint(connect_result)
+            self._record_connect_problem_without_status_change(connect_result, message)
+            self._release_session_lock()
+            return False
         if connect_result == "network":
+            self._remember_connect_problem("network", "connect failed")
             self.db.on_connect_network_issue(self.account.phone, "connect failed")
             self._release_session_lock()
             return False
         if connect_result == "auth_key_duplicated":
+            self._remember_connect_problem("needs_reauth", "AuthKeyDuplicatedError")
             self.db.set_account_status(
                 self.account.phone, ACCOUNT_STATUS_NEEDS_REAUTH,
                 "AuthKeyDuplicatedError")
             self._release_session_lock()
             return False
         if connect_result != "ok":
+            self._remember_connect_problem("connect_error", "low-level connect failed")
             self.db.on_connect_error(self.account.phone, "low-level connect failed")
             self._release_session_lock()
             return False
@@ -266,6 +317,7 @@ class TelegramSender:
         except (AuthKeyUnregisteredError, AuthKeyInvalidError,
                 SessionExpiredError, SessionRevokedError) as e:
             print(f"[!] Сессия недействительна {self.account.phone}: {type(e).__name__}")
+            self._remember_connect_problem("needs_reauth", type(e).__name__)
             self.db.set_account_status(
                 self.account.phone, ACCOUNT_STATUS_NEEDS_REAUTH, type(e).__name__)
             self._release_session_lock()
@@ -273,6 +325,7 @@ class TelegramSender:
         except (UserDeactivatedBanError, PhoneNumberBannedError,
                 UserDeactivatedError) as e:
             print(f"[!] Аккаунт забанен {self.account.phone}: {type(e).__name__}")
+            self._remember_connect_problem("banned", type(e).__name__)
             self.db.set_account_status(
                 self.account.phone, ACCOUNT_STATUS_BANNED, type(e).__name__)
             self._release_session_lock()
@@ -280,6 +333,7 @@ class TelegramSender:
         except Exception as e:
             print(f"[-] Неожиданная ошибка проверки авторизации "
                   f"{self.account.phone}: {type(e).__name__}: {e}")
+            self._remember_connect_problem("connect_error", type(e).__name__)
             self.db.on_connect_error(self.account.phone, type(e).__name__)
             self._release_session_lock()
             return False
@@ -298,6 +352,7 @@ class TelegramSender:
                   f"Вероятные причины: terminate с другого устройства, "
                   f"смена 2FA-пароля, анти-фрод при смене IP. "
                   f"Требуется переимпорт tdata.")
+            self._remember_connect_problem("needs_reauth", "is_user_authorized=False")
             self.db.set_account_status(
                 self.account.phone, ACCOUNT_STATUS_NEEDS_REAUTH,
                 "is_user_authorized=False (session revoked)")

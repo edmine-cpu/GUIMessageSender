@@ -896,6 +896,18 @@ class Database:
             """, (ACCOUNT_STATUS_NETWORK_ISSUE, cooldown_until, stamp, phone))
             self.conn.commit()
 
+    def record_connect_problem(self, phone: str, reason: str = ""):
+        """Записать последнюю connect-проблему без смены статуса аккаунта."""
+        self.conn.execute(
+            "UPDATE accounts SET last_error_at=?, last_error_text=? WHERE phone=?",
+            (
+                datetime.now().isoformat(timespec="seconds"),
+                f"connect:{(reason or '')[:200]}",
+                phone,
+            ),
+        )
+        self.conn.commit()
+
     def on_connect_error(self, phone: str, reason: str = ""):
         """Неопознанная ошибка. При CONNECT_FAIL_THRESHOLD+ — needs_reauth."""
         self.conn.execute(

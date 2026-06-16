@@ -11614,6 +11614,18 @@ class AutoReplyFrame(ctk.CTkFrame):
         self._loop = None
         self._thread = None
         self._stop_requested = threading.Event()
+        self._reply_mode_label_to_code = {
+            "1 раз до остановки": autoreply.REPLY_MODE_SESSION,
+            "1 раз навсегда": autoreply.REPLY_MODE_FOREVER,
+            "Каждое сообщение": autoreply.REPLY_MODE_EVERY_MESSAGE,
+            "За сессию": autoreply.REPLY_MODE_SESSION,
+            "Навсегда": autoreply.REPLY_MODE_FOREVER,
+        }
+        self._reply_mode_values = [
+            "1 раз до остановки",
+            "1 раз навсегда",
+            "Каждое сообщение",
+        ]
 
         ctk.CTkLabel(self, text="Автоответчик",
                      font=ctk.CTkFont(size=20, weight="bold")).pack(
@@ -11641,12 +11653,12 @@ class AutoReplyFrame(ctk.CTkFrame):
         self.entry_template = ctk.CTkTextbox(form, height=100)
         self.entry_template.grid(row=0, column=1, pady=6, sticky="ew")
 
-        self.reply_mode_var = ctk.StringVar(value="За сессию")
+        self.reply_mode_var = ctk.StringVar(value=self._reply_mode_values[0])
         ctk.CTkLabel(form, text="Повторные ответы:", anchor="w").grid(
             row=1, column=0, padx=(0, 8), pady=6, sticky="w")
         ctk.CTkSegmentedButton(
             form,
-            values=["За сессию", "Навсегда"],
+            values=self._reply_mode_values,
             variable=self.reply_mode_var,
         ).grid(row=1, column=1, pady=6, sticky="w")
 
@@ -11733,14 +11745,20 @@ class AutoReplyFrame(ctk.CTkFrame):
             self.log.append("[!] Введите шаблон ответа")
             return
 
-        reply_mode = "session" if (self.reply_mode_var.get() or "") == "За сессию" else "forever"
+        reply_mode = self._reply_mode_label_to_code.get(
+            (self.reply_mode_var.get() or "").strip(),
+            autoreply.REPLY_MODE_SESSION,
+        )
         include_kw = self.include_keywords.get().strip() if hasattr(self, "include_keywords") else ""
         exclude_kw = self.exclude_keywords.get().strip() if hasattr(self, "exclude_keywords") else ""
 
         self._stop_requested.clear()
         self.btn_start.configure(state="disabled")
         self.btn_stop.configure(state="normal")
-        self.log.append(f"[~] Запускаю автоответчик для {acc.phone}...")
+        self.log.append(
+            f"[~] Запускаю автоответчик для {acc.phone}..."
+            f" Режим: {autoreply.reply_mode_label(reply_mode)}"
+        )
         self._set_status("запуск...", "#F39C12")
 
         log_queue = self.app.log_queue
@@ -11767,7 +11785,7 @@ class AutoReplyFrame(ctk.CTkFrame):
 
                 def _status_hint(st: str) -> str:
                     if st == "needs_reauth":
-                        return "Нужен переимпорт TData/сессии (auth_key отозван/устарел)."
+                        return "Сессия устарела или отозвана. Переимпортируйте TData/.session для этого аккаунта."
                     if st == "banned":
                         return "Аккаунт забанен Telegram (навсегда или надолго)."
                     if st == "network_issue":
@@ -11821,8 +11839,20 @@ class AutoReplyFrame(ctk.CTkFrame):
                                 _acc2 = next((a for a in _db.get_all_accounts() if a.phone == acc.phone), None)
                             finally:
                                 _db.close()
-                            if _acc2 and getattr(_acc2, "status", ""):
-                                detail = f"подключение: {getattr(_acc2,'status','')}"
+                            code = getattr(sender, "last_connect_error_code", "") or ""
+                            hint = TelegramSender.connect_problem_hint(code)
+                            st = getattr(_acc2, "status", "") if _acc2 else ""
+                            if not hint and st == "needs_reauth":
+                                hint = TelegramSender.connect_problem_hint("needs_reauth")
+                                code = "needs_reauth"
+                            if hint:
+                                print(f"  [>] {hint}")
+                            if code in ("session_locked", "database_locked", "in_app_session_busy"):
+                                detail = "сессия/БД занята"
+                            elif code == "needs_reauth" or st == "needs_reauth":
+                                detail = "нужен переимпорт сессии"
+                            elif _acc2 and st:
+                                detail = f"подключение: {st}"
                         except Exception:
                             pass
                         log_queue.put(("autoreply_state", ("error", detail)))
@@ -11849,7 +11879,13 @@ class AutoReplyFrame(ctk.CTkFrame):
                     await self._listener.start()
                 except Exception as e:
                     print(f"[-] Ошибка автоответчика: {type(e).__name__}: {e}")
-                    log_queue.put(("autoreply_state", ("error", f"{type(e).__name__}")))
+                    hint = ""
+                    text = str(e).lower()
+                    if "database is locked" in text or "database table is locked" in text or "locked" in text:
+                        hint = TelegramSender.connect_problem_hint("database_locked")
+                    if hint:
+                        print(f"  [>] {hint}")
+                    log_queue.put(("autoreply_state", ("error", hint or f"{type(e).__name__}")))
                 finally:
                     try:
                         await sender.disconnect()

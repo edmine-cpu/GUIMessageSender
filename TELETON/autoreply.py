@@ -14,6 +14,28 @@ from telethon.tl.types import User
 from database import Database
 
 
+REPLY_MODE_SESSION = "session"
+REPLY_MODE_FOREVER = "forever"
+REPLY_MODE_EVERY_MESSAGE = "every_message"
+
+REPLY_MODE_LABELS = {
+    REPLY_MODE_SESSION: "1 раз до остановки",
+    REPLY_MODE_FOREVER: "1 раз навсегда",
+    REPLY_MODE_EVERY_MESSAGE: "Каждое сообщение",
+}
+
+
+def normalize_reply_mode(reply_mode: str) -> str:
+    mode = (reply_mode or REPLY_MODE_SESSION).strip()
+    if mode in REPLY_MODE_LABELS:
+        return mode
+    return REPLY_MODE_SESSION
+
+
+def reply_mode_label(reply_mode: str) -> str:
+    return REPLY_MODE_LABELS.get(normalize_reply_mode(reply_mode), REPLY_MODE_LABELS[REPLY_MODE_SESSION])
+
+
 class AutoReplyListener:
     """
     Слушатель входящих личных сообщений с автоответом.
@@ -39,12 +61,12 @@ class AutoReplyListener:
         client      — подключённый TelegramClient
         template    — шаблон ответного сообщения
         progress_cb — коллбэк для логирования в GUI
-        reply_mode  — "session" или "forever"
+        reply_mode  — "session", "forever" или "every_message"
         """
         self.client = client
         self.template = template
         self.progress_cb = progress_cb
-        self.reply_mode = (reply_mode or "session").strip()
+        self.reply_mode = normalize_reply_mode(reply_mode)
         self.db = db
         self.account_phone = (account_phone or "").strip()
         self.include_keywords = include_keywords or ""
@@ -57,10 +79,12 @@ class AutoReplyListener:
         me = await self.client.get_me()
         self.progress_cb(f"  [+] Автоответчик запущен: {me.phone}")
         self.progress_cb(f"  [~] Шаблон: {self.template[:80]}")
-        if self.reply_mode == "forever":
+        if self.reply_mode == REPLY_MODE_FOREVER:
             self.progress_cb("  [i] Режим: отвечать один раз НАВСЕГДА (с сохранением в БД)")
+        elif self.reply_mode == REPLY_MODE_EVERY_MESSAGE:
+            self.progress_cb("  [i] Режим: отвечать на КАЖДОЕ входящее личное сообщение")
         else:
-            self.progress_cb("  [i] Режим: отвечать один раз за СЕССИЮ")
+            self.progress_cb("  [i] Режим: отвечать один раз ДО ОСТАНОВКИ")
 
         @self.client.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
         async def handler(event):
@@ -86,16 +110,16 @@ class AutoReplyListener:
                 self._log_event(sender, event, status="skip", reason="filtered", reply_text="")
                 return
 
-            if self.reply_mode == "forever":
+            if self.reply_mode == REPLY_MODE_FOREVER:
                 if self.db and self.account_phone and self.db.has_autoreplied_forever(self.account_phone, sender.id):
                     name = getattr(sender, "username", None) or getattr(sender, "first_name", str(sender.id))
                     self.progress_cb(f"  [~] Пропуск @{name} (id:{sender.id}): уже отвечали (навсегда)")
                     self._log_event(sender, event, status="skip", reason="already_replied_forever", reply_text="")
                     return
-            else:
+            elif self.reply_mode == REPLY_MODE_SESSION:
                 if sender.id in self._replied:
                     name = getattr(sender, "username", None) or getattr(sender, "first_name", str(sender.id))
-                    self.progress_cb(f"  [~] Пропуск @{name} (id:{sender.id}): уже отвечали (в сессии)")
+                    self.progress_cb(f"  [~] Пропуск @{name} (id:{sender.id}): уже отвечали до остановки")
                     self._log_event(sender, event, status="skip", reason="already_replied_session", reply_text="")
                     return
 
@@ -114,7 +138,7 @@ class AutoReplyListener:
                             return
                 await event.reply(self.template)
                 self._replied.add(sender.id)
-                if self.reply_mode == "forever" and self.db and self.account_phone:
+                if self.reply_mode == REPLY_MODE_FOREVER and self.db and self.account_phone:
                     self.db.mark_autoreplied_forever(self.account_phone, sender.id)
                 name = getattr(sender, "username", None) or getattr(sender, "first_name", str(sender.id))
                 self.progress_cb(f"  [+] Ответил @{name} (id:{sender.id})")
