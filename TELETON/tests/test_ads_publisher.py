@@ -17,9 +17,13 @@ class _SendMessageClient:
 
 
 class _SendMessageWithButtonsClient:
-    def __init__(self, result):
+    def __init__(self, result, bot=True):
         self.result = result
+        self.bot = bot
         self.calls = []
+
+    async def get_me(self):
+        return SimpleNamespace(bot=self.bot)
 
     async def send_message(self, target, text, **kwargs):
         self.calls.append((target, text, kwargs))
@@ -27,9 +31,13 @@ class _SendMessageWithButtonsClient:
 
 
 class _SendFileWithButtonsClient:
-    def __init__(self, result):
+    def __init__(self, result, bot=True):
         self.result = result
+        self.bot = bot
         self.calls = []
+
+    async def get_me(self):
+        return SimpleNamespace(bot=self.bot)
 
     async def send_file(self, target, media_path, **kwargs):
         self.calls.append((target, media_path, kwargs))
@@ -67,6 +75,27 @@ async def test_publish_to_group_passes_url_button_to_send_message():
     assert target == "@desk"
     assert text == "hello"
     assert kwargs["buttons"] is not None
+
+
+@pytest.mark.asyncio
+async def test_publish_to_group_falls_back_to_link_text_for_user_account():
+    client = _SendMessageWithButtonsClient(SimpleNamespace(id=123), bot=False)
+    group = GroupTarget(link="@desk")
+
+    result = await publish_to_group(
+        client,
+        group,
+        "hello",
+        button_text="Написать",
+        button_url="@contact",
+    )
+
+    assert result.status == PUB_STATUS_OK
+    assert len(client.calls) == 1
+    target, text, kwargs = client.calls[0]
+    assert target == "@desk"
+    assert text == "hello\n\nНаписать: https://t.me/contact"
+    assert kwargs == {}
 
 
 @pytest.mark.asyncio

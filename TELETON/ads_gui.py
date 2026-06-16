@@ -562,7 +562,7 @@ class AdDialog(ctk.CTkToplevel):
         self.e_button_url.grid(row=0, column=1, padx=(5, 0), sticky="ew")
         ctk.CTkLabel(
             button_frame,
-            text="Необязательно: текст кнопки + ссылка, куда она ведёт",
+            text="Bot: inline-кнопка; обычный аккаунт: ссылка в тексте",
             text_color="gray60",
             font=ctk.CTkFont(size=11),
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(2, 0))

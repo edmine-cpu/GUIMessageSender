@@ -147,6 +147,26 @@ def _build_url_button(button_text: str, button_url: str):
     return Button.url(text, normalize_button_url(url))
 
 
+async def _client_supports_buttons(client) -> bool:
+    """Telegram only allows custom buttons from bot sessions."""
+    try:
+        get_me = getattr(client, "get_me", None)
+        if get_me is None:
+            return False
+        me = await asyncio.wait_for(get_me(), timeout=10.0)
+        return bool(getattr(me, "bot", False))
+    except Exception:
+        return False
+
+
+def _append_button_link(text: str, button_text: str, button_url: str) -> str:
+    url = normalize_button_url(button_url)
+    label = (button_text or "").strip()
+    if not label or not url:
+        return text
+    return f"{text}\n\n{label}: {url}"
+
+
 async def publish_to_group(
     client,
     group: GroupTarget,
@@ -198,27 +218,32 @@ async def publish_to_group(
                 error_text=str(e),
                 retry_after=_retry_after_hours(1),
             )
+        use_inline_button = bool(button and await _client_supports_buttons(client))
+        outbound_text = (
+            text if use_inline_button or button is None
+            else _append_button_link(text, button_text, button_url)
+        )
 
         if media_path and os.path.exists(media_path):
-            if button:
+            if use_inline_button:
                 msg = await asyncio.wait_for(
-                    client.send_file(target, media_path, caption=text, buttons=button),
+                    client.send_file(target, media_path, caption=outbound_text, buttons=button),
                     timeout=30.0,
                 )
             else:
                 msg = await asyncio.wait_for(
-                    client.send_file(target, media_path, caption=text),
+                    client.send_file(target, media_path, caption=outbound_text),
                     timeout=30.0,
                 )
         else:
-            if button:
+            if use_inline_button:
                 msg = await asyncio.wait_for(
-                    client.send_message(target, text, buttons=button),
+                    client.send_message(target, outbound_text, buttons=button),
                     timeout=30.0,
                 )
             else:
                 msg = await asyncio.wait_for(
-                    client.send_message(target, text),
+                    client.send_message(target, outbound_text),
                     timeout=30.0,
                 )
 
