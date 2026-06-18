@@ -6431,7 +6431,7 @@ class BroadcastFrame(ctk.CTkFrame):
         )
         self.lbl_broadcast_errors = ctk.CTkLabel(status_panel, text="—", anchor="w", text_color=("#991B1B", "#FCA5A5"))
         self.lbl_broadcast_errors.grid(row=4, column=1, columnspan=2, padx=8, pady=(3, 8), sticky="ew")
-        ctk.CTkButton(status_panel, text="Обновить", width=95, command=self._refresh_broadcast_status_panel).grid(
+        ctk.CTkButton(status_panel, text="Обновить", width=95, command=self._refresh_broadcast_dashboard).grid(
             row=4, column=3, padx=8, pady=(3, 8), sticky="e"
         )
 
@@ -10315,6 +10315,14 @@ class BroadcastFrame(ctk.CTkFrame):
         self._broadcast_status_after_id = None
         self._refresh_broadcast_status_panel()
         self._schedule_broadcast_status_refresh()
+
+    def _refresh_broadcast_dashboard(self):
+        self._refresh_broadcast_status_panel()
+        try:
+            if hasattr(self, "_tasks_embed"):
+                self._tasks_embed.refresh()
+        except Exception as e:
+            self._append_log(f"[refresh] tasks table refresh failed: {e}")
 
     def _refresh_broadcast_status_panel(self):
         if not hasattr(self, "lbl_broadcast_state"):

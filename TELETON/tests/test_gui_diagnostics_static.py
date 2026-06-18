@@ -24,3 +24,10 @@ def test_log_queue_routing_still_handles_broadcast_tags():
     assert 'tag.startswith("broadcast")' in poll_fn
     assert 'tag.startswith("cycle")' in poll_fn
 
+
+def test_broadcast_dashboard_refresh_button_updates_status_and_tasks_table():
+    src = (ROOT / "gui.py").read_text(encoding="utf-8")
+    assert "command=self._refresh_broadcast_dashboard" in src
+    refresh_fn = src.split("def _refresh_broadcast_dashboard", 1)[1].split("def _refresh_broadcast_status_panel", 1)[0]
+    assert "self._refresh_broadcast_status_panel()" in refresh_fn
+    assert "self._tasks_embed.refresh()" in refresh_fn
