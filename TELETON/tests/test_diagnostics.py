@@ -30,6 +30,18 @@ def test_human_action_block_reason():
     assert "подождать" in human_action_block_reason("min_interval", 30)
 
 
+def test_daily_actions_limit_pause_reason_is_not_min_interval_text():
+    text = human_reason("paused", "daily_actions_limit:200")
+    assert "дневной лимит" in text
+    assert "подождать" not in text
+    assert "между действиями" not in text
+
+    action_text = human_action_block_reason("daily_actions_limit:200")
+    assert "дневной лимит" in action_text
+    assert "подождать" not in action_text
+    assert "между действиями" not in action_text
+
+
 def test_human_exception_uses_exception_name_and_seconds():
     text = human_exception(DummyFloodWait(61))
     assert "Flood wait" in text

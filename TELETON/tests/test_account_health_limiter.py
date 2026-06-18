@@ -1,9 +1,11 @@
 import os
 import tempfile
 import time
+from datetime import date, datetime
 
 import pytest
 
+import database as database_module
 from database import Database
 from models import Account
 
@@ -36,6 +38,55 @@ def test_try_acquire_action_slot_min_interval(tmp_db_path):
         assert ok3 is True
         assert reason3 == "ok"
         assert wait_s3 == 0.0
+    finally:
+        db.close()
+
+
+def test_try_acquire_action_slot_daily_limit_pauses_until_next_midnight_and_health_reason(tmp_db_path, monkeypatch):
+    class FixedDate(date):
+        @classmethod
+        def today(cls):
+            return cls(2026, 6, 18)
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 6, 18, 14, 30, 0, tzinfo=tz)
+
+    monkeypatch.setattr(database_module, "date", FixedDate)
+    monkeypatch.setattr(database_module, "datetime", FixedDateTime)
+
+    daily_limit = 2
+    phone = "+300"
+    db = Database(tmp_db_path)
+    try:
+        db.add_account(Account(
+            phone=phone,
+            session_name=f"data/sessions/session_{phone}",
+            actions_today=daily_limit,
+            last_reset_date=FixedDate.today().isoformat(),
+        ))
+
+        ok, reason, wait_s = db.try_acquire_action_slot(
+            phone,
+            "dm",
+            min_interval_seconds=0,
+            daily_actions_limit=daily_limit,
+        )
+
+        assert ok is False
+        assert reason == "daily_limit"
+        assert wait_s == 0.0
+
+        acc = next(x for x in db.get_all_accounts() if x.phone == phone)
+        assert acc.paused_until == "2026-06-19T00:00:00"
+        assert acc.pause_reason == f"daily_actions_limit:{daily_limit}"
+
+        h = next(x for x in db.get_accounts_health() if x["phone"] == phone)
+        assert h["health"] == "paused"
+        assert "дневной лимит" in h["why"]
+        assert "подождать" not in h["why"]
+        assert "между действиями" not in h["why"]
     finally:
         db.close()
 
