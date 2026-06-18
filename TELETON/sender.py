@@ -287,7 +287,11 @@ class TelegramSender:
             self._record_connect_problem_without_status_change("in_app_session_busy", message)
             return False
         # 1. Низкоуровневое подключение
-        connect_result = await self._raw_connect_with_retry()
+        try:
+            connect_result = await self._raw_connect_with_retry()
+        except asyncio.CancelledError:
+            self._release_session_lock()
+            raise
         if connect_result in ("session_locked", "database_locked"):
             message = self.connect_problem_hint(connect_result)
             self._record_connect_problem_without_status_change(connect_result, message)
@@ -314,6 +318,9 @@ class TelegramSender:
         # 2. Проверка авторизации — здесь могут вылететь auth-специфичные ошибки
         try:
             authorized = await self.client.is_user_authorized()
+        except asyncio.CancelledError:
+            self._release_session_lock()
+            raise
         except (AuthKeyUnregisteredError, AuthKeyInvalidError,
                 SessionExpiredError, SessionRevokedError) as e:
             print(f"[!] Сессия недействительна {self.account.phone}: {type(e).__name__}")

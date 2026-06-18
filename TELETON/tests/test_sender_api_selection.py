@@ -4,9 +4,10 @@
 Стратегия: мокаем TelegramClient, чтобы не делать реальные подключения,
 и проверяем что конструктор вызван с правильными параметрами из Account.
 """
+import asyncio
 import os
 import sys
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 import tempfile
 
 import pytest
@@ -162,3 +163,51 @@ class TestConnectAuthKeyErrors:
         assert restored.connect_fail_count == 0
         assert "database_locked" in restored.last_error_text
         assert sender.last_connect_error_code == "database_locked"
+
+    @pytest.mark.asyncio
+    async def test_cancelled_connect_releases_session_lock_during_raw_connect(self, db):
+        from sender import TelegramSender
+        from config import Config
+
+        acc = Account(phone="+79001234569", api_id=123, api_hash="h")
+
+        with patch("sender.TelegramClient") as MockClient:
+            MockClient.return_value = MagicMock()
+            sender = TelegramSender(acc, Config(), db)
+
+            async def fake_raw_connect():
+                raise asyncio.CancelledError
+
+            sender._raw_connect_with_retry = fake_raw_connect
+            with pytest.raises(asyncio.CancelledError):
+                await sender.connect()
+
+        assert sender._session_lock_acquired is False
+        lock = TelegramSender.try_acquire_account_session(acc.phone)
+        assert lock is not None
+        TelegramSender.release_account_session(lock)
+
+    @pytest.mark.asyncio
+    async def test_cancelled_connect_releases_session_lock_during_authorization_check(self, db):
+        from sender import TelegramSender
+        from config import Config
+
+        acc = Account(phone="+79001234570", api_id=123, api_hash="h")
+
+        with patch("sender.TelegramClient") as MockClient:
+            client = MagicMock()
+            client.is_user_authorized = AsyncMock(side_effect=asyncio.CancelledError)
+            MockClient.return_value = client
+            sender = TelegramSender(acc, Config(), db)
+
+            async def fake_raw_connect():
+                return "ok"
+
+            sender._raw_connect_with_retry = fake_raw_connect
+            with pytest.raises(asyncio.CancelledError):
+                await sender.connect()
+
+        assert sender._session_lock_acquired is False
+        lock = TelegramSender.try_acquire_account_session(acc.phone)
+        assert lock is not None
+        TelegramSender.release_account_session(lock)
