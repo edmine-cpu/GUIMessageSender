@@ -5552,6 +5552,8 @@ class AudiencesFrame(ctk.CTkFrame):
         self._running = False
         self._audiences = []  # кэш данных аудиторий
 
+        self._stop_event = threading.Event()
+        self._dm_thread = None
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.pack(padx=20, pady=(12, 2), fill="x")
         ctk.CTkLabel(header, text="👥 Аудитории", font=ctk.CTkFont(size=22, weight="bold"),
@@ -5812,6 +5814,17 @@ class AudiencesFrame(ctk.CTkFrame):
 
         ctk.CTkButton(btn_row, text="Закрыть", width=80, fg_color="gray40",
                        command=self._hide_dm_panel).pack(side="left")
+        self.btn_dm_stop = ctk.CTkButton(
+            btn_row,
+            text="Остановить DM",
+            width=115,
+            state="disabled",
+            fg_color="firebrick",
+            hover_color="darkred",
+            command=self._stop_dm,
+        )
+        self.btn_dm_stop.pack(side="left", padx=(0, 10))
+
 
     def _show_dm_panel(self, audience: dict):
         self._dm_audience = audience
@@ -5864,8 +5877,10 @@ class AudiencesFrame(ctk.CTkFrame):
 
         self._running = True
         self.btn_dm_send.configure(state="disabled", text="Отправка...")
+        self._stop_event.clear()
         self.log.clear()
 
+        self.btn_dm_stop.configure(state="normal")
         def dm_thread():
             log_queue = self.app.log_queue
             _thread_local.log_handler = lambda msg: log_queue.put(("audiences_log", msg))
@@ -5900,7 +5915,26 @@ class AudiencesFrame(ctk.CTkFrame):
                     from ads_database import AdsDB
                     from ads_scheduler import random_dm_delay_sec
 
-                    if not await sender.connect():
+                    stats = {"sent": 0, "private": 0, "flood_wait": 0, "banned": 0, "error": 0, "dry_run": 0}
+
+                    async def _dm_wait(coro, label: str, timeout: float, target_value: str = ""):
+                        try:
+                            return await _await_interruptibly(
+                                coro,
+                                self._stop_event,
+                                op_name="DM",
+                                label=label,
+                                timeout=timeout,
+                                account=phone,
+                                target=str(target_value or ""),
+                            )
+                        except asyncio.TimeoutError:
+                            stats["error"] += 1
+                            print(f"  [!] {label}: таймаут {timeout:.0f}с — пропуск")
+                            return None
+
+                    connected = await _dm_wait(sender.connect(), f"{phone}: подключение", 30)
+                    if not connected:
                         print("[!] Не удалось подключиться")
                         return
 
@@ -5917,11 +5951,16 @@ class AudiencesFrame(ctk.CTkFrame):
                         mode = "DRY-RUN" if dry_run else "LIVE"
                         print(f"[*] Начинаю DM-рассылку: {len(members)} получателей, режим: {mode}")
 
-                        stats = {"sent": 0, "private": 0, "flood_wait": 0, "banned": 0, "error": 0, "dry_run": 0}
-
                         for i, member in enumerate(members, 1):
                             if not sender.can_send_more():
                                 print("[!] Достигнут лимит сообщений на сессию")
+                            _raise_if_stop_requested(
+                                self._stop_event,
+                                op_name="DM",
+                                account=phone,
+                                target=str(member.get("username") or member.get("user_id") or ""),
+                                progress=f"получатель={i}/{len(members)}",
+                            )
                                 break
 
                             spun_msg = spin_text(message)
@@ -5933,8 +5972,19 @@ class AudiencesFrame(ctk.CTkFrame):
                                 print(f"  [DRY] DM -> {target}: {preview}")
                                 status = "dry_run"
                             else:
-                                status = await sender.send_dm(
-                                    member["user_id"], member.get("username", ""), spun_msg, member.get("access_hash", 0))
+                                status = await _dm_wait(
+                                    sender.send_dm(
+                                        member["user_id"],
+                                        member.get("username", ""),
+                                        spun_msg,
+                                        member.get("access_hash", 0),
+                                    ),
+                                    f"{target}: отправка DM",
+                                    45,
+                                    target,
+                                )
+                                if status is None:
+                                    continue
                             stats[status] = stats.get(status, 0) + 1
 
                             # Терминальные статусы — выходим без паузы (ротация/стоп)
@@ -5954,13 +6004,29 @@ class AudiencesFrame(ctk.CTkFrame):
                                     print(f"  [~] Пауза {delay:.0f}с (диапазон "
                                           f"{_settings.dm_delay_min_seconds}-"
                                           f"{_settings.dm_delay_max_seconds}с)...")
-                                    await asyncio.sleep(delay)
+                                    await _sleep_interruptibly(
+                                        delay,
+                                        self._stop_event,
+                                        op_name="DM",
+                                        account=phone,
+                                        target=str(target),
+                                        progress=f"получатель={i}/{len(members)}",
+                                    )
 
                         print(f"[*] DM завершена: sent={stats['sent']}, "
                               f"private={stats['private']}, error={stats['error']}, "
                               f"dry_run={stats['dry_run']}")
                     finally:
-                        await sender.disconnect()
+                        try:
+                            await asyncio.wait_for(sender.disconnect(), timeout=10)
+                        except Exception as e:
+                            print(f"[!] {phone}: disconnect не завершился быстро ({type(e).__name__})")
+                    except OperationInterrupted as e:
+                        print(str(e))
+                        print(
+                            f"[=] DM остановлена: аккаунт={phone} | sent={stats['sent']} "
+                            f"| private={stats['private']} | errors={stats['error']} | dry_run={stats['dry_run']}"
+                        )
 
                 _run_loop(loop, run_dm())
                 db.close()
@@ -5971,7 +6037,21 @@ class AudiencesFrame(ctk.CTkFrame):
                 _thread_local.log_handler = None
                 log_queue.put(("audiences_done", ""))
 
-        threading.Thread(target=dm_thread, daemon=True).start()
+        dm_worker = threading.Thread(target=dm_thread, name="AudienceDMWorker", daemon=True)
+        self._dm_thread = dm_worker
+        dm_worker.start()
+
+    def _stop_dm(self):
+        thread = getattr(self, "_dm_thread", None)
+        if not self._running and not (thread is not None and thread.is_alive()):
+            return
+        self._stop_event.set()
+        try:
+            self.btn_dm_send.configure(state="disabled", text="Останавливается...")
+            self.btn_dm_stop.configure(state="disabled")
+        except Exception:
+            pass
+        self.log.append("[~] Остановка DM запрошена...")
 
     def on_queue_message(self, tag, msg):
         if tag == "audiences_log":
@@ -5980,7 +6060,9 @@ class AudiencesFrame(ctk.CTkFrame):
             self._running = False
             self.btn_dm_send.configure(state="normal", text="Разослать DM")
 
+            self._dm_thread = None
 
+            self.btn_dm_stop.configure(state="disabled")
 class BroadcastFrame(ctk.CTkFrame):
     """Раздел: Задачи рассылки"""
 
@@ -5995,6 +6077,10 @@ class BroadcastFrame(ctk.CTkFrame):
         self._quick_account_phones: list[str] = []
         self._cycle_runtime: dict[str, dict] = {}
         self._broadcast_status_after_id = None
+        self._quick_thread = None
+        self._mention_thread = None
+        self._broadcast_thread = None
+        self._check_thread = None
         self._broadcast_ui_state = {
             "state": "idle",
             "current": "—",
@@ -6147,23 +6233,23 @@ class BroadcastFrame(ctk.CTkFrame):
 
         stopped = []
 
-        # 1. Остановить парсинг (если в этом фрейме, но обычно в parsing tab)
+        # 1. Остановить broadcast / mention / quick / check в этом фрейме.
         try:
             if hasattr(self, "_stop_event"):
                 self._stop_event.set()
-                stopped.append("парсинг/задачи")
+                stopped.append("broadcast/mention/quick/check")
         except Exception:
             pass
 
-        # 2. Остановить broadcast / mention / quick (в этом фрейме)
+        # 2. Дополнительно: если есть btn_stop_current — нажмём его логику (если метод есть).
         try:
-            if hasattr(self, "_stop_event"):
-                self._stop_event.set()
-                stopped.append("broadcast/mention/quick")
+            if hasattr(self, "_stop_current_process"):
+                self._stop_current_process()
+                stopped.append("текущий процесс")
         except Exception:
             pass
 
-        # 3. Остановить циклы (используем существующий _stop_cycle)
+        # 3. Остановить циклы (используем существующий _stop_cycle).
         try:
             runners = getattr(self, "_cycle_runners", None) or {}
             active_cycle_names = [name for name, runner in runners.items() if self._cycle_runner_alive(runner)]
@@ -6178,7 +6264,58 @@ class BroadcastFrame(ctk.CTkFrame):
         except Exception:
             pass
 
-        # 4. Остановить ads-планировщики из отдельного реестра ads_gui.py
+        # 4. Остановить уже созданные соседние вкладки, если там есть активная работа.
+        frames = getattr(getattr(self, "app", None), "frames", {}) or {}
+
+        try:
+            parsing_frame = frames.get("parsing")
+            if parsing_frame is not None and getattr(parsing_frame, "_running", False):
+                parsing_frame._stop_parsing()
+                stopped.append("парсинг")
+        except Exception as e:
+            self._append_log(f"[!] Parsing stop: {e}")
+
+        try:
+            audiences_frame = frames.get("audiences")
+            audience_thread = getattr(audiences_frame, "_dm_thread", None) if audiences_frame is not None else None
+            if audiences_frame is not None and (
+                getattr(audiences_frame, "_running", False)
+                or (audience_thread is not None and audience_thread.is_alive())
+            ):
+                audiences_frame._stop_dm()
+                stopped.append("DM")
+        except Exception as e:
+            self._append_log(f"[!] DM stop: {e}")
+
+        try:
+            channel_frame = frames.get("channel_commenter")
+            if channel_frame is not None:
+                old_btn = getattr(channel_frame, "btn_old_stop", None)
+                new_btn = getattr(channel_frame, "btn_new_stop", None)
+                old_enabled = bool(old_btn is not None and old_btn.cget("state") != "disabled")
+                new_enabled = bool(new_btn is not None and new_btn.cget("state") != "disabled")
+                if old_enabled:
+                    channel_frame._stop_old()
+                    stopped.append("комментинг старых постов")
+                if new_enabled or getattr(channel_frame, "_listener", None) is not None:
+                    channel_frame._stop_new()
+                    stopped.append("комментинг новых постов")
+        except Exception as e:
+            self._append_log(f"[!] Channel commenter stop: {e}")
+
+        try:
+            autoreply_frame = frames.get("autoreply")
+            autoreply_thread = getattr(autoreply_frame, "_thread", None) if autoreply_frame is not None else None
+            if autoreply_frame is not None and (
+                getattr(autoreply_frame, "_listener", None) is not None
+                or (autoreply_thread is not None and autoreply_thread.is_alive())
+            ):
+                autoreply_frame._stop()
+                stopped.append("автоответчик")
+        except Exception as e:
+            self._append_log(f"[!] AutoReply stop: {e}")
+
+        # 5. Остановить ads-планировщики из отдельного реестра ads_gui.py.
         try:
             from ads_gui import stop_all_ads_schedulers
             ads_stopped = stop_all_ads_schedulers(self._append_log)
@@ -6187,37 +6324,8 @@ class BroadcastFrame(ctk.CTkFrame):
         except Exception as e:
             self._append_log(f"[!] Ads scheduler stop: {e}")
 
-        # 5. Дополнительно: если есть btn_stop_current — нажмём его логику (если метод есть)
-        try:
-            if hasattr(self, "_stop_current_process"):
-                self._stop_current_process()
-                stopped.append("текущий процесс")
-        except Exception:
-            pass
-
-        # 6. Сброс флага и обновление кнопки стопа
-        try:
-            self._running = False
-            if hasattr(self, "btn_stop_current"):
-                self.btn_stop_current.configure(state="disabled", text="■ Остановить текущий процесс")
-        except Exception:
-            pass
-
         if stopped:
-            self._append_log(f"[⏹] Остановлено: {', '.join(stopped)}")
-        else:
-            self._append_log("[⏹] Ничего активного не нашли для останова.")
-
-        # 5. Сбросить флаги running в этом фрейме
-        try:
-            self._running = False
-            if hasattr(self, "_active_op_name"):
-                self._active_op_name = ""
-        except Exception:
-            pass
-
-        if stopped:
-            self._append_log(f"[⏹] Остановлено: {', '.join(stopped)}. Если что-то ещё висит — нажми индивидуальные стопы в табах.")
+            self._append_log(f"[⏹] Остановка запрошена: {', '.join(dict.fromkeys(stopped))}. Жду завершения активных операций...")
         else:
             self._append_log("[⏹] Ничего активного не нашли для останова (или уже остановлено).")
 
@@ -9656,7 +9764,13 @@ class BroadcastFrame(ctk.CTkFrame):
 
                         async def _quick_wait(coro, label: str, timeout: float):
                             try:
-                                return await asyncio.wait_for(coro, timeout=timeout)
+                                return await _await_interruptibly(
+                                    coro,
+                                    self._stop_event,
+                                    op_name="быстрый старт",
+                                    label=label,
+                                    timeout=timeout,
+                                )
                             except asyncio.TimeoutError:
                                 stats["errors"] += 1
                                 print(f"  [!] {label}: таймаут {timeout:.0f}с — пропуск")
@@ -9781,11 +9895,10 @@ class BroadcastFrame(ctk.CTkFrame):
                                             )
 
                             finally:
-                                await _quick_wait(
-                                    sender.disconnect(),
-                                    f"{acc.phone}: отключение",
-                                    10,
-                                )
+                                try:
+                                    await asyncio.wait_for(sender.disconnect(), timeout=10)
+                                except Exception as e:
+                                    print(f"  [!] {acc.phone}: disconnect не завершился быстро ({type(e).__name__})")
 
                         print(f"[=] Быстрый старт завершён: sent={stats['sent']}, dry={stats['dry_run']}, errors={stats['errors']}")
                     finally:
@@ -9998,6 +10111,22 @@ class BroadcastFrame(ctk.CTkFrame):
 
                         while batch_idx < len(batches) and acc_idx < len(accounts):
                             acc = accounts[acc_idx]
+                        async def _mention_wait(coro, label: str, timeout: float, acc_phone: str = "", target_value: str = ""):
+                            try:
+                                return await _await_interruptibly(
+                                    coro,
+                                    self._stop_event,
+                                    op_name="упоминания",
+                                    label=label,
+                                    timeout=timeout,
+                                    account=acc_phone,
+                                    target=target_value,
+                                )
+                            except asyncio.TimeoutError:
+                                stats["errors"] += 1
+                                print(f"  [!] {label}: таймаут {timeout:.0f}с — пропуск")
+                                return None
+
                             _raise_if_stop_requested(
                                 self._stop_event,
                                 op_name="упоминания",
@@ -10007,7 +10136,14 @@ class BroadcastFrame(ctk.CTkFrame):
                             )
                             sender = TelegramSender(acc, cfg, db)
 
-                            if not await sender.connect():
+                            connected = await _mention_wait(
+                                sender.connect(),
+                                f"{acc.phone}: подключение",
+                                30,
+                                acc.phone,
+                                target,
+                            )
+                            if not connected:
                                 acc_idx += 1
                                 continue
 
@@ -10019,7 +10155,17 @@ class BroadcastFrame(ctk.CTkFrame):
                                     target=target,
                                     progress=f"батч={batch_idx + 1}/{len(batches)}",
                                 )
-                                decision, reason, _retry_after = await ensure_chat_access(sender.client, target, dry_run=dry_run)
+                                access_result = await _mention_wait(
+                                    ensure_chat_access(sender.client, target, dry_run=dry_run),
+                                    f"{target}: проверка доступа",
+                                    25,
+                                    acc.phone,
+                                    target,
+                                )
+                                if access_result is None:
+                                    acc_idx += 1
+                                    continue
+                                decision, reason, _retry_after = access_result
                                 if decision != "ok":
                                     print(f"[!] Нет доступа к {target}: {reason}")
                                     batch_idx = len(batches)
@@ -10037,7 +10183,14 @@ class BroadcastFrame(ctk.CTkFrame):
                                 # Получить текст: из Избранного или вручную
                                 if _use_saved_m:
                                     if acc.phone not in _saved_texts or not _saved_texts[acc.phone]:
-                                        _saved_texts[acc.phone] = await sender.get_saved_messages(limit=30)
+                                        saved = await _mention_wait(
+                                            sender.get_saved_messages(limit=30),
+                                            f"{acc.phone}: чтение Избранного",
+                                            20,
+                                            acc.phone,
+                                            target,
+                                        )
+                                        _saved_texts[acc.phone] = saved or []
                                     raw = random.choice(_saved_texts[acc.phone]) if _saved_texts.get(acc.phone) else _base_message_m
                                 elif _use_templates_m:
                                     raw = random.choice(_templates_m) if _templates_m else _base_message_m
@@ -10053,7 +10206,16 @@ class BroadcastFrame(ctk.CTkFrame):
                                     raw_status = "dry_run"
                                     status = "dry_run"
                                 else:
-                                    raw_status = await sender.send_mention_message(target, text, entities)
+                                    raw_status = await _mention_wait(
+                                        sender.send_mention_message(target, text, entities),
+                                        f"{target}: отправка упоминаний",
+                                        45,
+                                        acc.phone,
+                                        target,
+                                    )
+                                    if raw_status is None:
+                                        batch_idx += 1
+                                        continue
                                     status = raw_status.split(":", 1)[0]
 
                                 user_ids = [u.user_id for u in batch]
@@ -10133,7 +10295,10 @@ class BroadcastFrame(ctk.CTkFrame):
                                             progress=f"после ошибки | батч={batch_idx}/{len(batches)}",
                                         )
                             finally:
-                                await sender.disconnect()
+                                try:
+                                    await asyncio.wait_for(sender.disconnect(), timeout=10)
+                                except Exception as e:
+                                    print(f"  [!] {acc.phone}: disconnect не завершился быстро ({type(e).__name__})")
 
                             acc_idx += 1
 
@@ -10160,7 +10325,9 @@ class BroadcastFrame(ctk.CTkFrame):
                 _thread_local.log_handler = None
                 self.app.log_queue.put(("mention_done", None))
 
-        threading.Thread(target=mention_thread, daemon=True).start()
+        mention_worker = threading.Thread(target=mention_thread, name="MentionWorker", daemon=True)
+        self._mention_thread = mention_worker
+        mention_worker.start()
 
     def _import_groups_csv(self):
         path = filedialog.askopenfilename(
@@ -10321,13 +10488,35 @@ class BroadcastFrame(ctk.CTkFrame):
 
                         from sender import TelegramSender
                         sender = TelegramSender(accounts[0], cfg, db)
-                        if not await sender.connect():
-                            return
 
                         stats = {"deleted": 0, "joined": 0, "already": 0, "error": 0}
 
                         try:
                             for task in tasks:
+                        async def _check_wait(coro, label: str, timeout: float, target_value: str = ""):
+                            try:
+                                return await _await_interruptibly(
+                                    coro,
+                                    self._stop_event,
+                                    op_name="проверка задач",
+                                    label=label,
+                                    timeout=timeout,
+                                    account=accounts[0].phone if accounts else "",
+                                    target=target_value,
+                                )
+                            except asyncio.TimeoutError:
+                                stats["error"] += 1
+                                print(f"  [!] {label}: таймаут {timeout:.0f}с — пропуск")
+                                return None
+
+                        connected = await _check_wait(
+                            sender.connect(),
+                            f"{accounts[0].phone}: подключение",
+                            30,
+                        )
+                        if not connected:
+                            return
+
                                 url = task.target_group
                                 _raise_if_stop_requested(
                                     self._stop_event,
@@ -10343,7 +10532,14 @@ class BroadcastFrame(ctk.CTkFrame):
                             try:
                                 if is_invite:
                                     # Валидируем инвайт-ссылку — исключения в except'ах ниже
-                                    invite_info = await sender.client(CheckChatInviteRequest(slug))
+                                    invite_info = await _check_wait(
+                                        sender.client(CheckChatInviteRequest(slug)),
+                                        f"{url}: проверка invite",
+                                        25,
+                                        url,
+                                    )
+                                    if invite_info is None:
+                                        return
                                     if dry_run:
                                         if type(invite_info).__name__ == "ChatInviteAlready":
                                             print(f"  [DRY] Уже в группе: {url}")
@@ -10354,7 +10550,14 @@ class BroadcastFrame(ctk.CTkFrame):
                                     else:
                                         # Ссылка жива — пробуем вступить
                                         try:
-                                            await sender.client(ImportChatInviteRequest(slug))
+                                            joined = await _check_wait(
+                                                sender.client(ImportChatInviteRequest(slug)),
+                                                f"{url}: вступление invite",
+                                                35,
+                                                url,
+                                            )
+                                            if joined is None:
+                                                return
                                             print(f"  [+] Вступил: {url}")
                                             stats["joined"] += 1
                                         except UserAlreadyParticipantError:
@@ -10362,14 +10565,28 @@ class BroadcastFrame(ctk.CTkFrame):
                                             stats["already"] += 1
                                 else:
                                     if dry_run:
-                                        await sender.client.get_entity(url)
+                                        entity = await _check_wait(
+                                            sender.client.get_entity(url),
+                                            f"{url}: проверка ссылки",
+                                            25,
+                                            url,
+                                        )
+                                        if entity is None:
+                                            return
                                         print(f"  [DRY] Ссылка валидна, в live была бы попытка вступления: {url}")
                                         stats["joined"] += 1
                                     else:
                                         # Публичная группа — JoinChannelRequest резолвит url inline,
                                         # без отдельного get_entity (меньше resolve-запросов в логах)
                                         try:
-                                            await sender.client(JoinChannelRequest(url))
+                                            joined = await _check_wait(
+                                                sender.client(JoinChannelRequest(url)),
+                                                f"{url}: вступление",
+                                                35,
+                                                url,
+                                            )
+                                            if joined is None:
+                                                return
                                             print(f"  [+] Вступил: {url}")
                                             stats["joined"] += 1
                                         except UserAlreadyParticipantError:
@@ -10433,7 +10650,10 @@ class BroadcastFrame(ctk.CTkFrame):
                                 stats["error"] += 1
 
                         finally:
-                            await sender.disconnect()
+                            try:
+                                await asyncio.wait_for(sender.disconnect(), timeout=10)
+                            except Exception as e:
+                                print(f"  [!] {accounts[0].phone}: disconnect не завершился быстро ({type(e).__name__})")
 
                         print("\n=== Итого ===")
                         print(f"Удалено (мёртвые): {stats['deleted']}")
@@ -10457,7 +10677,9 @@ class BroadcastFrame(ctk.CTkFrame):
                 _thread_local.log_handler = None
                 self.app.log_queue.put(("check_done", None))
 
-        threading.Thread(target=check_thread, daemon=True).start()
+        check_worker = threading.Thread(target=check_thread, name="BroadcastCheckWorker", daemon=True)
+        self._check_thread = check_worker
+        check_worker.start()
 
     def _schedule_broadcast_status_refresh(self):
         try:
@@ -10761,6 +10983,23 @@ class BroadcastFrame(ctk.CTkFrame):
                         current_task_index = 0
                         for acc in accounts:
                             current_account = acc.phone
+
+                        async def _broadcast_wait(coro, label: str, timeout: float, acc_phone: str = "", target_value: str = ""):
+                            try:
+                                return await _await_interruptibly(
+                                    coro,
+                                    self._stop_event,
+                                    op_name="рассылка",
+                                    label=label,
+                                    timeout=timeout,
+                                    account=acc_phone,
+                                    target=target_value,
+                                )
+                            except asyncio.TimeoutError:
+                                stats["errors"] += 1
+                                print(f"  [!] {label}: таймаут {timeout:.0f}с — пропуск")
+                                return None
+
                             _raise_if_stop_requested(
                                 self._stop_event,
                                 op_name="рассылка",
@@ -10769,7 +11008,13 @@ class BroadcastFrame(ctk.CTkFrame):
                             )
                             sender = TelegramSender(acc, cfg, db)
 
-                            if not await sender.connect():
+                            connected = await _broadcast_wait(
+                                sender.connect(),
+                                f"{acc.phone}: подключение",
+                                45,
+                                acc.phone,
+                            )
+                            if not connected:
                                 continue
 
                             try:
@@ -10798,11 +11043,18 @@ class BroadcastFrame(ctk.CTkFrame):
                                         total=len(tasks),
                                     )
 
-                                    decision, reason, retry_after = await ensure_chat_access(
-                                        sender.client, task.target_group, dry_run=dry_run
+                                    access_result = await _broadcast_wait(
+                                        ensure_chat_access(sender.client, task.target_group, dry_run=dry_run),
+                                        f"{task.target_group}: проверка доступа",
+                                        35,
+                                        acc.phone,
+                                        task.target_group,
                                     )
                                     if decision != "ok":
                                         if task.id and not dry_run:
+                                    if access_result is None:
+                                        continue
+                                    decision, reason, retry_after = access_result
                                             if decision == "waiting":
                                                 db.mark_task_waiting(task.id, retry_after, f"join:{reason}")
                                                 task.status = "waiting"
@@ -10829,7 +11081,14 @@ class BroadcastFrame(ctk.CTkFrame):
                                     # Источник текста
                                     if _b_source == "Избранное":
                                         if acc.phone not in _saved_texts_b or not _saved_texts_b[acc.phone]:
-                                            _saved_texts_b[acc.phone] = await sender.get_saved_messages(limit=30)
+                                            saved = await _broadcast_wait(
+                                                sender.get_saved_messages(limit=30),
+                                                f"{acc.phone}: чтение Избранного",
+                                                20,
+                                                acc.phone,
+                                                task.target_group,
+                                            )
+                                            _saved_texts_b[acc.phone] = saved or []
                                         raw_msg = random.choice(_saved_texts_b[acc.phone]) if _saved_texts_b.get(acc.phone) else task.message_text
                                     elif _b_source == "Шаблоны":
                                         templates = [line.strip() for line in task.message_text.splitlines() if line.strip()]
@@ -10860,7 +11119,15 @@ class BroadcastFrame(ctk.CTkFrame):
                                         status = "dry_run"
                                         error_detail = ""
                                     else:
-                                        raw_status = await sender.send_broadcast_message(task.target_group, msg)
+                                        raw_status = await _broadcast_wait(
+                                            sender.send_broadcast_message(task.target_group, msg),
+                                            f"{task.target_group}: отправка",
+                                            45,
+                                            acc.phone,
+                                            task.target_group,
+                                        )
+                                        if raw_status is None:
+                                            continue
                                         status = raw_status.split(":", 1)[0]
                                         error_detail = raw_status if raw_status != status else ""
 
@@ -10967,7 +11234,10 @@ class BroadcastFrame(ctk.CTkFrame):
                                                 progress=f"задача={task_i + 1}/{len(tasks)}",
                                             )
                             finally:
-                                await sender.disconnect()
+                                try:
+                                    await asyncio.wait_for(sender.disconnect(), timeout=10)
+                                except Exception as e:
+                                    print(f"  [!] {acc.phone}: disconnect не завершился быстро ({type(e).__name__})")
 
                         print("\n=== Задачи рассылки завершены ===")
                     except OperationInterrupted as e:
@@ -10989,7 +11259,9 @@ class BroadcastFrame(ctk.CTkFrame):
                 log_queue.put(("broadcast_progress", {"event": "done"}))
                 self.app.log_queue.put(("broadcast_done", None))
 
-        threading.Thread(target=broadcast_thread, daemon=True).start()
+        broadcast_worker = threading.Thread(target=broadcast_thread, name="BroadcastQueueWorker", daemon=True)
+        self._broadcast_thread = broadcast_worker
+        broadcast_worker.start()
 
     def on_queue_message(self, tag, msg):
         if tag == "quick_log":
@@ -11014,6 +11286,12 @@ class BroadcastFrame(ctk.CTkFrame):
         elif tag in ("quick_done", "mention_done", "broadcast_done"):
             self._running = False
             self._active_op_name = ""
+            if tag == "quick_done":
+                self._quick_thread = None
+            elif tag == "mention_done":
+                self._mention_thread = None
+            elif tag == "broadcast_done":
+                self._broadcast_thread = None
             self.btn_mention.configure(state="normal", text="Начать упоминания")
             # Освободить аккаунты от не-циклических задач
             try:
@@ -11052,6 +11330,7 @@ class BroadcastFrame(ctk.CTkFrame):
         elif tag == "check_done":
             self._running = False
             self._active_op_name = ""
+            self._check_thread = None
             self.btn_check.configure(state="normal", text="Проверить и очистить")
             self.btn_mention.configure(state="normal", text="Начать упоминания")
             self.btn_broadcast.configure(state="normal", text="Запустить задачи")
@@ -11059,22 +11338,62 @@ class BroadcastFrame(ctk.CTkFrame):
 
     def _stop_current_process(self):
         runners = getattr(self, "_cycle_runners", None) or {}
+    def _worker_alive(self, attr_name: str) -> bool:
+        thread = getattr(self, attr_name, None)
+        return bool(thread is not None and thread.is_alive())
+
+    def _regular_worker_alive(self) -> bool:
+        return any(
+            self._worker_alive(attr)
+            for attr in ("_quick_thread", "_mention_thread", "_broadcast_thread", "_check_thread")
+        )
+
+    def _active_regular_op_label(self) -> str:
+        if getattr(self, "_running", False) and getattr(self, "_active_op_name", ""):
+            return self._active_op_name
+        if self._worker_alive("_quick_thread"):
+            return "быстрый старт"
+        if self._worker_alive("_mention_thread"):
+            return "упоминания"
+        if self._worker_alive("_broadcast_thread"):
+            return "рассылку"
+        if self._worker_alive("_check_thread"):
+            return "проверку задач"
+        return "текущий процесс"
+
         active_cycle_names = [name for name, runner in runners.items() if self._cycle_runner_alive(runner)]
         old_thread = getattr(self, "_cycle_thread", None)
         old_cycle_active = getattr(self, "_cycle_running", False) or (old_thread is not None and old_thread.is_alive())
         cycle_active = bool(active_cycle_names) or old_cycle_active
 
-        if not self._running and not cycle_active:
+        if not regular_active and not cycle_active:
+        regular_active = getattr(self, "_running", False) or self._regular_worker_alive()
             return
-        if self._running:
+        if regular_active:
             self._stop_event.set()
-            label = self._active_op_name or "текущий процесс"
+            label = self._active_regular_op_label()
             self.btn_stop_current.configure(state="disabled", text=f"■ Остановка: {label}")
             self.log.append(f"[~] Остановка запрошена: {label}...")
-            if label == "рассылку":
+            if label == "рассылку" or self._worker_alive("_broadcast_thread"):
                 self._handle_broadcast_progress({"event": "stopping"})
         if cycle_active:
             if active_cycle_names:
+            if label == "быстрый старт" or self._worker_alive("_quick_thread"):
+                try:
+                    self.btn_quick_start.configure(state="disabled", text="Останавливается...")
+                    self.lbl_quick_status.configure(text="Статус: останавливается...", text_color="#F39C12")
+                except Exception:
+                    pass
+            if label == "упоминания" or self._worker_alive("_mention_thread"):
+                try:
+                    self.btn_mention.configure(state="disabled", text="Останавливается...")
+                except Exception:
+                    pass
+            if label == "проверку задач" or self._worker_alive("_check_thread"):
+                try:
+                    self.btn_check.configure(state="disabled", text="Останавливается...")
+                except Exception:
+                    pass
                 self.log.append(f"[Циклическая] [~] Запрошена остановка кампаний: {', '.join(active_cycle_names)}")
                 for name in active_cycle_names:
                     self._stop_cycle(name)
