@@ -4968,7 +4968,7 @@ class ParsingFrame(ctk.CTkFrame):
             except Exception:
                 pass
 
-        # Обновляем остальные селекторы аккаунтов (рассылки, быстрый старт и т.д.)
+        # Обновляем остальные селекторы аккаунтов (рассылки и т.д.)
         for var_name, menu_name in [
             ("dm_account_var", "dm_account_menu"),
             ("m_account_var", "m_account_menu"),
@@ -6101,10 +6101,6 @@ class BroadcastFrame(ctk.CTkFrame):
         self._running = False
         self._stop_event = threading.Event()
         self._active_op_name = ""
-        self._quick_template = None
-        self._quick_template_links: list[str] = []
-        self._quick_account_phones: list[str] = []
-        self._quick_thread = None
         self._mention_thread = None
         self._broadcast_thread = None
         self._check_thread = None
@@ -6155,13 +6151,11 @@ class BroadcastFrame(ctk.CTkFrame):
         self.tabview = ctk.CTkTabview(self)
         self.tabview.pack(padx=20, pady=5, fill="both", expand=True)
 
-        self.tab_quick = self.tabview.add("Быстрый старт")
         self.tab_mention = self.tabview.add("Упоминания")
         self.tab_broadcast = self.tabview.add("Запуск задач")
         self.tab_tasks = self.tabview.add("Очередь")
         self.tab_cycle = self.tabview.add("Циклическая")
 
-        self._build_quick_tab()
         self._build_mention_tab()
         self._build_broadcast_tab()
         self._build_tasks_tab()
@@ -6245,7 +6239,7 @@ class BroadcastFrame(ctk.CTkFrame):
         except Exception as e:
             self._append_log(f"[!] Задачи рассылки: {e}")
 
-        # (Быстрый старт и Упоминания можно запускать отдельно из их под-табов — они не входят в массовый "рассылка везде")
+        # Упоминания можно запускать отдельно из своей под-вкладки.
 
         # 4. Упоминания (если кнопка активна / данные есть)
         try:
@@ -6261,16 +6255,16 @@ class BroadcastFrame(ctk.CTkFrame):
             self._append_log("[🚀] Массовый запуск: нечего запускать (нет enabled циклов / pending задач / конфигурации).")
 
     def _mass_stop_everything(self):
-        """Массовый стоп всего, что может работать: парсинг, упоминания, broadcast, циклы, быстрый старт и т.д."""
+        """Массовый стоп всего, что может работать: парсинг, упоминания, broadcast, циклы и т.д."""
         self._append_log("[⏹] МАССОВЫЙ СТОП ВСЕГО — останавливаем все активные процессы...")
 
         stopped = []
 
-        # 1. Остановить broadcast / mention / quick / check в этом фрейме.
+        # 1. Остановить broadcast / mention / check в этом фрейме.
         try:
             if hasattr(self, "_set_all_regular_stop_events"):
                 self._set_all_regular_stop_events()
-                stopped.append("broadcast/mention/quick/check")
+                stopped.append("broadcast/mention/check")
         except Exception:
             pass
 
@@ -6498,126 +6492,6 @@ class BroadcastFrame(ctk.CTkFrame):
 
         self.btn_mention = ctk.CTkButton(tab, text="Начать упоминания", command=self._start_mention)
         self.btn_mention.pack(padx=10, pady=10, anchor="w")
-
-    def _build_quick_tab(self):
-        tab = self.tab_quick
-        top = ctk.CTkFrame(tab, fg_color="transparent")
-        top.pack(padx=10, pady=(12, 6), fill="x")
-        top.grid_columnconfigure(1, weight=1)
-
-        ctk.CTkLabel(top, text="Аккаунт:").grid(row=0, column=0, padx=5, pady=4, sticky="w")
-        self.q_account_var = ctk.StringVar(value="Все активные")
-        self.q_account_menu = ctk.CTkOptionMenu(top, variable=self.q_account_var, values=["Все активные"], width=220)
-        self.q_account_menu.grid(row=0, column=1, padx=5, pady=4, sticky="w")
-        ctk.CTkButton(top, text="Аккаунты…", width=120, command=self._quick_edit_accounts).grid(
-            row=0, column=2, padx=5, pady=4, sticky="w"
-        )
-        ctk.CTkButton(top, text="Очистить", width=100, fg_color="gray40", hover_color="gray30",
-                      command=self._quick_clear_accounts).grid(
-            row=0, column=3, padx=5, pady=4, sticky="w"
-        )
-        self.lbl_quick_accounts = ctk.CTkLabel(top, text="Аккаунты: общий выбор", text_color="gray70")
-        self.lbl_quick_accounts.grid(row=0, column=4, padx=5, pady=4, sticky="w")
-
-        ctk.CTkLabel(top, text="Шаблон чатов:").grid(row=1, column=0, padx=5, pady=4, sticky="w")
-        self.btn_quick_pick_template = ctk.CTkButton(top, text="Шаблон…", width=120, command=self._quick_pick_template)
-        self.btn_quick_pick_template.grid(row=1, column=1, padx=5, pady=4, sticky="w")
-        self.lbl_quick_template = ctk.CTkLabel(top, text="—", text_color="gray60")
-        self.lbl_quick_template.grid(row=1, column=2, columnspan=3, padx=5, pady=4, sticky="w")
-
-        msg = ctk.CTkFrame(tab, fg_color="transparent")
-        msg.pack(padx=10, pady=(8, 0), fill="x")
-        msg.grid_columnconfigure(1, weight=1)
-
-        ctk.CTkLabel(msg, text="Источник текста:").grid(row=0, column=0, padx=5, pady=3, sticky="w")
-        self.q_message_source_var = ctk.StringVar(value="Вручную")
-        src_row = ctk.CTkFrame(msg, fg_color="transparent")
-        src_row.grid(row=0, column=1, padx=5, pady=3, sticky="w")
-        ctk.CTkRadioButton(src_row, text="Вручную", variable=self.q_message_source_var,
-                           value="Вручную", command=self._toggle_quick_text).pack(side="left", padx=(0, 10))
-        ctk.CTkRadioButton(src_row, text="По строкам", variable=self.q_message_source_var,
-                           value="Строки", command=self._toggle_quick_text).pack(side="left", padx=(0, 10))
-        ctk.CTkRadioButton(src_row, text="Из Избранного", variable=self.q_message_source_var,
-                           value="Избранное", command=self._toggle_quick_text).pack(side="left")
-
-        ctk.CTkLabel(msg, text="Текст:").grid(row=1, column=0, padx=5, pady=3, sticky="nw")
-        self.q_message = ctk.CTkTextbox(msg, height=90)
-        self.q_message.grid(row=1, column=1, padx=5, pady=3, sticky="ew")
-
-        ctk.CTkLabel(msg, text="Уникализация:").grid(row=2, column=0, padx=5, pady=3, sticky="w")
-        self.q_unique_var = ctk.StringVar(value="Оригинал")
-        ctk.CTkSegmentedButton(msg, values=["Оригинал", "Спинтакс", "Омоглифы", "AI"],
-                               variable=self.q_unique_var).grid(
-            row=2, column=1, padx=5, pady=3, sticky="w")
-
-        btns = ctk.CTkFrame(tab, fg_color="transparent")
-        btns.pack(padx=10, pady=10, fill="x")
-        self.q_dry_run = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(btns, text="Dry Run", variable=self.q_dry_run).pack(side="left", padx=(0, 10))
-        self.btn_quick_start = ctk.CTkButton(btns, text="▶ Start", width=140, command=self._start_quick_broadcast)
-        self.btn_quick_start.pack(side="left", padx=(0, 8))
-        self.lbl_quick_status = ctk.CTkLabel(btns, text="Статус: готов", text_color="gray70")
-        self.lbl_quick_status.pack(side="right")
-
-        self._toggle_quick_text()
-
-    def _toggle_quick_text(self):
-        try:
-            if self.q_message_source_var.get() == "Избранное":
-                self.q_message.configure(state="disabled")
-            else:
-                self.q_message.configure(state="normal")
-        except Exception:
-            pass
-
-    def _quick_pick_template(self):
-        db = Database(self.app.config.db_path)
-        try:
-            templates = [t for t in db.get_all_list_templates() if t.get("kind") in ("groups", "channels", "mixed")]
-        finally:
-            db.close()
-        if not templates:
-            self.log.append("[!] Нет шаблонов чатов (создайте в разделе 'Шаблоны чатов/каналов')")
-            return
-        pick = ListTemplatePickerDialog(self, templates, title="Шаблон чатов для рассылки")
-        self.wait_window(pick)
-        if not pick.result:
-            return
-        self._quick_template = pick.result
-        self._quick_template_links = [l.strip() for l in (pick.result.get("content") or "").splitlines() if l.strip()]
-        self.lbl_quick_template.configure(text=pick.result.get("name") or "—")
-
-    def _quick_edit_accounts(self):
-        if self._running:
-            self.log.append("[!] Нельзя менять аккаунты во время отправки")
-            return
-        db = Database(self.app.config.db_path)
-        try:
-            accounts = db.get_all_accounts()
-        finally:
-            db.close()
-        dlg = CycleCampaignAccountsDialog(self, accounts=accounts, selected_phones=list(self._quick_account_phones or []))
-        self.wait_window(dlg)
-        if dlg.result is None:
-            return
-        self._quick_account_phones = list(dlg.result or [])
-        self._quick_refresh_accounts_ui()
-
-    def _quick_clear_accounts(self):
-        if self._running:
-            self.log.append("[!] Нельзя менять аккаунты во время отправки")
-            return
-        self._quick_account_phones = []
-        self._quick_refresh_accounts_ui()
-
-    def _quick_refresh_accounts_ui(self):
-        try:
-            if self._quick_account_phones:
-                self.lbl_quick_accounts.configure(text=f"Аккаунты: {len(self._quick_account_phones)}")
-            else:
-                self.lbl_quick_accounts.configure(text="Аккаунты: общий выбор")
-        except Exception:
-            pass
 
     def _build_broadcast_tab(self):
         tab = self.tab_broadcast
@@ -9642,318 +9516,6 @@ class BroadcastFrame(ctk.CTkFrame):
                               proxy=self.app.config.openai_proxy)
         return text  # Оригинал
 
-    def _start_quick_broadcast(self):
-        _log_action("broadcast", "_start_quick_broadcast")
-        if self._running:
-            return
-
-        self._ai_proxy_warned = False
-        dry_run = bool(self.q_dry_run.get())
-        selected_account = (self._resolve_phone(self.q_account_var.get()) or "Все активные").strip() or "Все активные"
-        unique_mode = (self.q_unique_var.get() or "Оригинал").strip() or "Оригинал"
-        msg_source = (self.q_message_source_var.get() or "Вручную").strip() or "Вручную"
-        raw_text = (self.q_message.get("1.0", "end").strip() if hasattr(self, "q_message") else "")
-
-        self.log.clear()
-        lines = ["[~] Быстрый старт: запуск ручной рассылки по шаблону."]
-        if not self._quick_template_links:
-            lines.append("[!] Не выбран шаблон чатов. Нажмите «Шаблон…».")
-            for ln in lines:
-                self.log.append(ln)
-            return
-
-        db = Database(self.app.config.db_path)
-        try:
-            accounts = db.get_active_accounts()
-        finally:
-            db.close()
-
-        if self._quick_account_phones:
-            accounts = [a for a in accounts if a.phone in set(self._quick_account_phones)]
-        elif selected_account != "Все активные":
-            accounts = [a for a in accounts if a.phone == selected_account]
-
-        targets = [t for t in self._quick_template_links if (t or "").strip()]
-
-        msg_candidates: list[str] = []
-        if msg_source == "Избранное":
-            msg_candidates = []
-        elif msg_source == "Строки":
-            msg_candidates = [l.strip() for l in raw_text.splitlines() if l.strip()]
-        else:
-            msg_candidates = [raw_text] if (raw_text or "").strip() else []
-
-        lines.append(f"    аккаунтов: {len(accounts)}")
-        lines.append(f"    целей (из шаблона): {len(targets)}")
-        lines.append(f"    источник текста: {msg_source}")
-        if msg_source != "Избранное":
-            lines.append(f"    строк текста: {len(msg_candidates)}")
-        lines.append(f"    уникализация: {unique_mode}")
-        lines.append(f"    Dry Run: {'ON' if dry_run else 'OFF'}")
-
-        ok = True
-        if not accounts:
-            ok = False
-            lines.append("[!] Нет активных аккаунтов для выбранного режима.")
-        if not targets:
-            ok = False
-            lines.append("[!] В шаблоне нет целей (пустой список).")
-        if msg_source != "Избранное" and not msg_candidates:
-            ok = False
-            lines.append("[!] Пустой текст. Введите текст или выберите «Из Избранного».")
-        if unique_mode == "AI" and not self.app.config.openai_api_key:
-            ok = False
-            lines.append("[!] Выбрана уникализация AI, но не задан OpenAI API Key в Настройках.")
-
-        for ln in lines:
-            self.log.append(f"[Быстрый старт] {ln}")
-        if not ok:
-            return
-
-        # Занять аккаунты (мягкая подсветка + колонка "Работа")
-        try:
-            phones = self._runtime_busy_phones(selected_account, getattr(self, "_quick_account_phones", None))
-            if phones:
-                self.mark_account_busy(phones, "Быстрый старт (массовый)")
-        except Exception:
-            pass
-
-        stop_event = threading.Event()
-        run_id = self._begin_regular_run("quick", stop_event)
-        self._active_op_name = "быстрый старт"
-        self._running = True
-        try:
-            self.btn_quick_start.configure(state="disabled", text="Выполняется...")
-        except Exception:
-            pass
-        self.btn_stop_current.configure(state="normal", text="■ Остановить быстрый старт")
-        try:
-            self.lbl_quick_status.configure(text="Статус: отправка…", text_color="#F39C12")
-        except Exception:
-            pass
-
-        worker_started = threading.Event()
-
-        def finish_quick_start(message: str):
-            self._running = False
-            self._active_op_name = ""
-            try:
-                busy = self.get_busy_accounts()
-                to_free = [p for p, ctx in busy.items() if "Циклическая" not in (ctx or "")]
-                if to_free:
-                    self.mark_account_free(to_free)
-            except Exception:
-                pass
-            try:
-                self.log.append(f"[Быстрый старт] {message}")
-            except Exception:
-                log_to_file("broadcast", f"[Быстрый старт] {message}")
-            try:
-                self.btn_quick_start.configure(state="normal", text="▶ Start")
-            except Exception:
-                pass
-            try:
-                self.btn_stop_current.configure(state="disabled", text="■ Остановить текущий процесс")
-            except Exception:
-                pass
-            try:
-                self.lbl_quick_status.configure(text="Статус: ошибка запуска", text_color="#E74C3C")
-            except Exception:
-                pass
-
-        def check_worker_started():
-            if self._running and not worker_started.is_set():
-                finish_quick_start("[!] Фоновый поток не стартовал за 3 секунды. Нажмите Start ещё раз; если повторится — смотрите data/logs/teleton_broadcast.log.")
-
-        def thread():
-            log_queue = self.app.log_queue
-            _thread_local.log_handler = lambda msg: log_queue.put(("quick_log", msg))
-            _thread_local.log_tag = "quick_broadcast"
-
-            try:
-                worker_started.set()
-                log_queue.put(("quick_log", "[i] Фоновый поток запущен"))
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-
-                async def do():
-                    from sender import TelegramSender
-                    from ads_database import AdsDB
-                    from ads_scheduler import random_broadcast_delay_sec
-                    from parser import ensure_chat_access
-
-                    cfg = self.app.config
-                    log_queue.put(("quick_log", "[i] Загружаю настройки и лимиты"))
-                    db2 = Database(cfg.db_path)
-                    _adsdb = AdsDB(cfg.db_path)
-                    try:
-                        _settings = _adsdb.load_scheduler_settings()
-                    finally:
-                        _adsdb.close()
-                    log_queue.put(("quick_log", f"[i] Настройки загружены, аккаунтов={len(accounts)}, целей={len(targets)}"))
-
-                    try:
-                        _saved_texts: dict = {}
-                        stats = {"sent": 0, "dry_run": 0, "errors": 0}
-
-                        async def _quick_wait(coro, label: str, timeout: float):
-                            try:
-                                return await _await_interruptibly(
-                                    coro,
-                                    stop_event,
-                                    op_name="быстрый старт",
-                                    label=label,
-                                    timeout=timeout,
-                                )
-                            except asyncio.TimeoutError:
-                                stats["errors"] += 1
-                                print(f"  [!] {label}: таймаут {timeout:.0f}с — пропуск")
-                                return None
-
-                        total_targets = len(targets)
-                        for acc_i, acc in enumerate(accounts):
-                            _raise_if_stop_requested(
-                                stop_event,
-                                op_name="быстрый старт",
-                                account=acc.phone,
-                                progress="до подключения",
-                            )
-                            log_queue.put(("quick_log", f"[~] Аккаунт {acc_i + 1}/{len(accounts)} {acc.phone}: подключаюсь..."))
-                            sender = TelegramSender(acc, cfg, db2)
-                            connected = await _quick_wait(
-                                sender.connect(),
-                                f"{acc.phone}: подключение",
-                                30,
-                            )
-                            if not connected:
-                                log_queue.put(("quick_log", f"[!] {acc.phone}: не подключился, аккаунт пропущен"))
-                                continue
-                            log_queue.put(("quick_log", f"[+] {acc.phone}: подключён"))
-                            try:
-                                for i, target in enumerate(targets, start=1):
-                                    _raise_if_stop_requested(
-                                        stop_event,
-                                        op_name="быстрый старт",
-                                        account=acc.phone,
-                                        target=target,
-                                        progress=f"цель={i}/{total_targets}",
-                                    )
-                                    log_queue.put(("quick_progress", {"account": acc.phone, "target": target, "i": i, "n": total_targets}))
-                                    if not sender.can_send_more():
-                                        break
-
-                                    access_result = await _quick_wait(
-                                        ensure_chat_access(sender.client, target, dry_run=dry_run),
-                                        f"{target}: проверка доступа",
-                                        25,
-                                    )
-                                    if access_result is None:
-                                        continue
-                                    decision, reason, retry_after = access_result
-                                    _raise_if_stop_requested(
-                                        stop_event,
-                                        op_name="быстрый старт",
-                                        account=acc.phone,
-                                        target=target,
-                                        progress=f"после проверки доступа {i}/{total_targets}",
-                                    )
-                                    if decision != "ok":
-                                        print(f"  [!] {target}: нет доступа ({reason}) — пропуск")
-                                        continue
-
-                                    if msg_source == "Избранное":
-                                        if acc.phone not in _saved_texts or not _saved_texts[acc.phone]:
-                                            saved = await _quick_wait(
-                                                sender.get_saved_messages(limit=30),
-                                                f"{acc.phone}: чтение Избранного",
-                                                20,
-                                            )
-                                            _saved_texts[acc.phone] = saved or []
-                                        raw_msg = random.choice(_saved_texts[acc.phone]) if _saved_texts.get(acc.phone) else ""
-                                    elif msg_source == "Строки":
-                                        raw_msg = random.choice(msg_candidates) if msg_candidates else ""
-                                    else:
-                                        raw_msg = msg_candidates[0] if msg_candidates else ""
-
-                                    _raise_if_stop_requested(
-                                        stop_event,
-                                        op_name="быстрый старт",
-                                        account=acc.phone,
-                                        target=target,
-                                        progress=f"перед отправкой {i}/{total_targets}",
-                                    )
-
-                                    if not (raw_msg or "").strip():
-                                        stats["errors"] += 1
-                                        print(f"  [!] {target}: пустой текст — пропуск")
-                                        continue
-
-                                    msg = self._apply_unique(raw_msg, unique_mode)
-                                    if dry_run:
-                                        preview = msg.replace("\n", " ").strip()
-                                        if len(preview) > 120:
-                                            preview = preview[:120] + "…"
-                                        print(f"  [DRY] {target} <- {acc.phone}: {preview}")
-                                        stats["dry_run"] += 1
-                                    else:
-                                        raw_status = await _quick_wait(
-                                            sender.send_broadcast_message(target, msg),
-                                            f"{target}: отправка",
-                                            45,
-                                        )
-                                        if raw_status is None:
-                                            continue
-                                        status = raw_status.split(":", 1)[0]
-                                        if status == "sent":
-                                            stats["sent"] += 1
-                                        else:
-                                            stats["errors"] += 1
-
-                                    if i < total_targets:
-                                        delay = random_broadcast_delay_sec(_settings)
-                                        if dry_run:
-                                            print(f"  [DRY] Пауза {delay:.0f}с пропущена "
-                                                  f"(диапазон {_settings.broadcast_delay_min_seconds}-"
-                                                  f"{_settings.broadcast_delay_max_seconds}с)")
-                                        else:
-                                            print(f"  [~] Пауза {delay:.0f}с (диапазон "
-                                                  f"{_settings.broadcast_delay_min_seconds}-"
-                                                  f"{_settings.broadcast_delay_max_seconds}с)...")
-                                            await _sleep_interruptibly(
-                                                delay,
-                                                stop_event,
-                                                op_name="быстрый старт",
-                                                account=acc.phone,
-                                                target=target,
-                                                progress=f"цель={i}/{total_targets}",
-                                            )
-
-                            finally:
-                                try:
-                                    await asyncio.wait_for(sender.disconnect(), timeout=10)
-                                except Exception as e:
-                                    print(f"  [!] {acc.phone}: disconnect не завершился быстро ({type(e).__name__})")
-
-                        print(f"[=] Быстрый старт завершён: sent={stats['sent']}, dry={stats['dry_run']}, errors={stats['errors']}")
-                    finally:
-                        db2.close()
-
-                _run_loop(loop, do())
-            except BaseException as e:
-                log_queue.put(("quick_log", f"[-] Ошибка: {e}"))
-            finally:
-                _thread_local.log_handler = None
-                log_queue.put(("quick_done", {"run_id": run_id}))
-
-        try:
-            quick_thread = threading.Thread(target=thread, name="QuickBroadcastWorker", daemon=True)
-            self._quick_thread = quick_thread
-            quick_thread.start()
-            self.log.append(f"[Быстрый старт] [i] Фоновый поток создан: alive={quick_thread.is_alive()}")
-            self.after(3000, check_worker_started)
-        except Exception as e:
-            finish_quick_start(f"[-] Не удалось создать фоновый поток: {e}")
-
     def on_show(self):
         self._refresh_accounts()
         self._refresh_cycle_templates()
@@ -9961,9 +9523,8 @@ class BroadcastFrame(ctk.CTkFrame):
         # === Диагностика циклических кампаний на старте (чтобы было видно, что происходит) ===
         try:
             now = time.monotonic()
-            quick_running = getattr(self, "_running", False) and getattr(self, "_active_op_name", "") == "быстрый старт"
             last_diag_at = getattr(self, "_cycle_start_diag_at", 0.0)
-            should_log_diag = not quick_running and (now - last_diag_at > 60)
+            should_log_diag = now - last_diag_at > 60
             if should_log_diag:
                 self._cycle_start_diag_at = now
                 db = Database(self.app.config.db_path)
@@ -11301,18 +10862,7 @@ class BroadcastFrame(ctk.CTkFrame):
         broadcast_worker.start()
 
     def on_queue_message(self, tag, msg):
-        if tag == "quick_log":
-            self.log.append(f"[Быстрый старт] {msg}")
-        elif tag == "quick_progress":
-            try:
-                a = (msg or {}).get("account", "—")
-                t = (msg or {}).get("target", "—")
-                i = int((msg or {}).get("i", 0) or 0)
-                n = int((msg or {}).get("n", 0) or 0)
-                self.lbl_quick_status.configure(text=f"Статус: {a} → {t} ({i}/{n})", text_color="#F39C12")
-            except Exception:
-                pass
-        elif tag == "broadcast_progress":
+        if tag == "broadcast_progress":
             self._handle_broadcast_progress(msg)
         elif tag == "broadcast_log":
             self.log.append(f"[Запуск задач] {msg}")
@@ -11320,9 +10870,8 @@ class BroadcastFrame(ctk.CTkFrame):
             self.log.append(f"[Циклическая] {msg}")
         elif tag == "cycle_progress":
             self._cycle_update_runtime(msg)
-        elif tag in ("quick_done", "mention_done", "broadcast_done"):
+        elif tag in ("mention_done", "broadcast_done"):
             key_by_tag = {
-                "quick_done": ("quick", "_quick_thread"),
                 "mention_done": ("mention", "_mention_thread"),
                 "broadcast_done": ("broadcast", "_broadcast_thread"),
             }
@@ -11330,9 +10879,7 @@ class BroadcastFrame(ctk.CTkFrame):
             run_id = msg.get("run_id") if isinstance(msg, dict) else None
             if run_id is not None and self._regular_run_ids.get(key) != run_id:
                 return
-            if tag == "quick_done":
-                self._quick_thread = None
-            elif tag == "mention_done":
+            if tag == "mention_done":
                 self._mention_thread = None
             elif tag == "broadcast_done":
                 self._broadcast_thread = None
@@ -11417,17 +10964,8 @@ class BroadcastFrame(ctk.CTkFrame):
             pass
         self.btn_mention.configure(state="normal", text="Начать упоминания")
         self.btn_broadcast.configure(state="normal", text="Запустить задачи")
-        try:
-            self.btn_quick_start.configure(state="normal", text="▶ Start")
-        except Exception:
-            pass
         self.btn_check.configure(state="normal", text="Проверить и очистить")
         self.btn_stop_current.configure(state="disabled", text="■ Остановить текущий процесс")
-        try:
-            status = "Статус: остановлено" if forced else "Статус: готов"
-            self.lbl_quick_status.configure(text=status, text_color="gray70")
-        except Exception:
-            pass
         if forced:
             self.log.append("[~] Stop cleanup timed out; UI unlocked, old worker left in background with stop flag set.")
 
@@ -11442,7 +10980,6 @@ class BroadcastFrame(ctk.CTkFrame):
         self._set_all_regular_stop_events()
         stuck_keys = []
         for key, attr in (
-            ("quick", "_quick_thread"),
             ("mention", "_mention_thread"),
             ("broadcast", "_broadcast_thread"),
             ("check", "_check_thread"),
@@ -11462,14 +10999,12 @@ class BroadcastFrame(ctk.CTkFrame):
     def _regular_worker_alive(self) -> bool:
         return any(
             self._worker_alive(attr)
-            for attr in ("_quick_thread", "_mention_thread", "_broadcast_thread", "_check_thread")
+            for attr in ("_mention_thread", "_broadcast_thread", "_check_thread")
         )
 
     def _active_regular_op_label(self) -> str:
         if getattr(self, "_running", False) and getattr(self, "_active_op_name", ""):
             return self._active_op_name
-        if self._worker_alive("_quick_thread"):
-            return "быстрый старт"
         if self._worker_alive("_mention_thread"):
             return "упоминания"
         if self._worker_alive("_broadcast_thread"):
@@ -11496,12 +11031,6 @@ class BroadcastFrame(ctk.CTkFrame):
             self.log.append(f"[~] Остановка запрошена: {label}...")
             if label == "рассылку" or self._worker_alive("_broadcast_thread"):
                 self._handle_broadcast_progress({"event": "stopping"})
-            if label == "быстрый старт" or self._worker_alive("_quick_thread"):
-                try:
-                    self.btn_quick_start.configure(state="disabled", text="Останавливается...")
-                    self.lbl_quick_status.configure(text="Статус: останавливается...", text_color="#F39C12")
-                except Exception:
-                    pass
             if label == "упоминания" or self._worker_alive("_mention_thread"):
                 try:
                     self.btn_mention.configure(state="disabled", text="Останавливается...")

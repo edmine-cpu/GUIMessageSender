@@ -205,7 +205,6 @@ def test_mass_stop_does_not_finalize_running_state():
 def test_broadcastframe_workers_use_interruptible_wait_wrappers():
     methods = _find_class_methods(_load_gui_source(), "BroadcastFrame")
     expectations = {
-        "_start_quick_broadcast": "async def _quick_wait",
         "_start_mention": "async def _mention_wait",
         "_check_and_clean": "async def _check_wait",
         "_start_broadcast": "async def _broadcast_wait",
@@ -220,7 +219,6 @@ def test_broadcastframe_workers_use_interruptible_wait_wrappers():
 def test_broadcastframe_workers_capture_per_run_stop_events():
     methods = _find_class_methods(_load_gui_source(), "BroadcastFrame")
     expectations = {
-        "_start_quick_broadcast": '"quick"',
         "_start_mention": '"mention"',
         "_check_and_clean": '"check"',
         "_start_broadcast": '"broadcast"',
@@ -238,7 +236,6 @@ def test_regular_worker_done_messages_use_run_ids_and_stale_guard():
     src = _load_gui_source()
     methods = _find_class_methods(src, "BroadcastFrame")
     on_queue = methods.get("on_queue_message", "")
-    assert '("quick_done", {"run_id": run_id})' in methods["_start_quick_broadcast"]
     assert '("mention_done", {"run_id": run_id})' in methods["_start_mention"]
     assert '("check_done", {"run_id": run_id})' in methods["_check_and_clean"]
     assert '("broadcast_done", {"run_id": run_id})' in methods["_start_broadcast"]
@@ -266,7 +263,6 @@ def test_stop_helpers_do_not_use_unbounded_gather_for_cancellation():
 def test_broadcastframe_workers_do_not_await_key_telegram_calls_directly():
     methods = _find_class_methods(_load_gui_source(), "BroadcastFrame")
     method_names = [
-        "_start_quick_broadcast",
         "_start_mention",
         "_check_and_clean",
         "_start_broadcast",
@@ -293,7 +289,6 @@ def test_stop_current_process_uses_worker_liveness_not_only_running_flag():
     methods = _find_class_methods(_load_gui_source(), "BroadcastFrame")
     stop_current = methods.get("_stop_current_process", "")
     assert "_regular_worker_alive()" in stop_current
-    assert 'self._worker_alive("_quick_thread")' in stop_current
     assert 'self._worker_alive("_broadcast_thread")' in stop_current
     assert 'self._worker_alive("_mention_thread")' in stop_current
     assert 'self._worker_alive("_check_thread")' in stop_current
