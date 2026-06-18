@@ -202,6 +202,24 @@ def test_mass_stop_does_not_finalize_running_state():
     assert "Остановка запрошена" in mass_stop
 
 
+def test_mass_start_can_restart_current_cycle_after_stop_all():
+    methods = _find_class_methods(_load_gui_source(), "BroadcastFrame")
+    mass_start = methods.get("_mass_start_everything", "")
+    assert mass_start
+    assert "Включённых циклов нет" in mass_start
+    assert "self._start_cycle()" in mass_start
+    assert "текущий цикл" in mass_start
+
+
+def test_mass_start_does_not_force_clear_regular_running_flag():
+    methods = _find_class_methods(_load_gui_source(), "BroadcastFrame")
+    mass_start = methods.get("_mass_start_everything", "")
+    assert mass_start
+    assert "db.get_pending_tasks(task_type=\"broadcast\")" in mass_start
+    assert "self._running = False" not in mass_start
+    assert "_regular_worker_alive()" in mass_start
+
+
 def test_broadcastframe_workers_use_interruptible_wait_wrappers():
     methods = _find_class_methods(_load_gui_source(), "BroadcastFrame")
     expectations = {

@@ -6250,19 +6250,44 @@ class BroadcastFrame(ctk.CTkFrame):
                 after_cycles = self._cycle_active_count() if hasattr(self, "_cycle_active_count") else before_cycles
                 if after_cycles > before_cycles:
                     started.append(f"циклы ({after_cycles - before_cycles} новых, всего {after_cycles})")
+                elif hasattr(self, "_start_cycle"):
+                    selected_cycle = (getattr(self, "_cycle_campaign_name", "") or "").strip()
+                    if not selected_cycle and hasattr(self, "c_campaign_var"):
+                        selected_cycle = (self.c_campaign_var.get() or "").strip()
+                    if selected_cycle and selected_cycle != "—":
+                        runner = self._cycle_get_runner(selected_cycle) if hasattr(self, "_cycle_get_runner") else None
+                        if not (hasattr(self, "_cycle_runner_alive") and self._cycle_runner_alive(runner)):
+                            self._append_log(
+                                f"[🚀] Включённых циклов нет — запускаю текущую кампанию: {selected_cycle}"
+                            )
+                            self._cycle_campaign_name = selected_cycle
+                            if hasattr(self, "c_campaign_var"):
+                                try:
+                                    self.c_campaign_var.set(selected_cycle)
+                                except Exception:
+                                    pass
+                            before_selected = self._cycle_active_count() if hasattr(self, "_cycle_active_count") else 0
+                            self._start_cycle()
+                            after_selected = self._cycle_active_count() if hasattr(self, "_cycle_active_count") else before_selected
+                            if after_selected > before_selected:
+                                started.append(f"текущий цикл ({selected_cycle})")
         except Exception as e:
             self._append_log(f"[!] Циклы: {e}")
 
         # 2. Broadcast задачи (очередь) — если есть pending/waiting
         try:
             db = Database(self.app.config.db_path)
-            pending = [t for t in db.get_all_tasks() if getattr(t, 'status', '') in ('pending', 'waiting')]
+            pending = db.get_pending_tasks(task_type="broadcast")
             db.close()
             if pending:
-                if getattr(self, '_running', False):
-                    self._running = False
-                self._start_broadcast()
-                started.append(f"задачи рассылки ({len(pending)})")
+                if getattr(self, "_running", False) or self._regular_worker_alive():
+                    self._append_log(
+                        f"[🚀] Очередь рассылки готова ({len(pending)}), но уже работает другой обычный процесс — не запускаю второй поверх."
+                    )
+                else:
+                    self._start_broadcast()
+                    if self._worker_alive("_broadcast_thread"):
+                        started.append(f"задачи рассылки ({len(pending)})")
         except Exception as e:
             self._append_log(f"[!] Задачи рассылки: {e}")
 
@@ -6271,8 +6296,12 @@ class BroadcastFrame(ctk.CTkFrame):
         # 4. Упоминания (если кнопка активна / данные есть)
         try:
             if hasattr(self, "_start_mention"):
-                self._start_mention()
-                started.append("упоминания")
+                if getattr(self, "_running", False) or self._regular_worker_alive():
+                    self._append_log("[🚀] Упоминания не запущены: уже работает очередь/проверка/другой обычный процесс.")
+                else:
+                    self._start_mention()
+                    if self._worker_alive("_mention_thread"):
+                        started.append("упоминания")
         except Exception as e:
             self._append_log(f"[!] Упоминания: {e}")
 
