@@ -32,6 +32,33 @@ STOP_CANCEL_GRACE_SECONDS = 1.0
 STOP_LOOP_CLEANUP_GRACE_SECONDS = 1.0
 STOP_UI_FORCE_MS = 3000
 
+
+def _split_message_template_variants(text: str) -> list[str]:
+    value = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not value:
+        return []
+
+    lines = value.split("\n")
+    if not any(line.strip() == "---" for line in lines):
+        return [value]
+
+    variants = []
+    current = []
+    for line in lines:
+        if line.strip() == "---":
+            block = "\n".join(current).strip()
+            if block:
+                variants.append(block)
+            current = []
+            continue
+        current.append(line)
+
+    block = "\n".join(current).strip()
+    if block:
+        variants.append(block)
+    return variants
+
+
 try:
     from file_logger import log_exception
 except Exception:
@@ -8462,9 +8489,9 @@ class BroadcastFrame(ctk.CTkFrame):
                 if len(msg_preview) > 120:
                     msg_preview = msg_preview[:120] + "…"
                 if message_source == "Шаблоны":
-                    lines = [l.strip() for l in msg_text.splitlines() if l.strip()]
+                    variants = _split_message_template_variants(msg_text)
                     tpl_note = f" ({message_template_name})" if message_template_name else ""
-                    self.log.append(f"  [i] Текст: шаблон{tpl_note}, строк={len(lines)}, уникализация={unique_mode}")
+                    self.log.append(f"  [i] Текст: шаблон{tpl_note}, вариантов={len(variants)}, уникализация={unique_mode}")
                     if msg_preview:
                         self.log.append(f"  [i] Превью: {msg_preview}")
                 elif message_source == "Избранное":
@@ -8570,7 +8597,7 @@ class BroadcastFrame(ctk.CTkFrame):
                 acc_pos = 0
                 acc_pos_init_done = False
                 empty_saved_accounts: set[str] = set()
-                templates_cache = [l.strip() for l in msg_text.splitlines() if l.strip()]
+                templates_cache = _split_message_template_variants(msg_text)
                 first_loop_logged = False
 
                 def _allowed_hours(now_h: int, hs: int, he: int) -> bool:
@@ -9662,7 +9689,7 @@ class BroadcastFrame(ctk.CTkFrame):
         _use_templates_m = use_templates
         _unique_mode_m = unique_mode
         _base_message_m = message
-        _templates_m = [line.strip() for line in message.splitlines() if line.strip()]
+        _templates_m = _split_message_template_variants(message)
 
         stop_event = threading.Event()
         run_id = self._begin_regular_run("mention", stop_event)
@@ -10722,7 +10749,7 @@ class BroadcastFrame(ctk.CTkFrame):
                                             _saved_texts_b[acc.phone] = saved or []
                                         raw_msg = random.choice(_saved_texts_b[acc.phone]) if _saved_texts_b.get(acc.phone) else task.message_text
                                     elif _b_source == "Шаблоны":
-                                        templates = [line.strip() for line in task.message_text.splitlines() if line.strip()]
+                                        templates = _split_message_template_variants(task.message_text)
                                         raw_msg = random.choice(templates) if templates else task.message_text
                                     else:
                                         raw_msg = task.message_text
