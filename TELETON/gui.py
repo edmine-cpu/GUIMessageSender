@@ -2916,7 +2916,7 @@ class AccountsFrame(ctk.CTkFrame):
             return "● Цикл"
         if "упомин" in low or "mention" in low:
             return "● Упомин."
-        if any(x in low for x in ("быстрый", "рассыл", "broadcast", "spam", "спам")):
+        if any(x in low for x in ("быстрый", "рассыл", "broadcast", "spam", "спам", "объяв", "ads")):
             return "● Спам"
         return "● Занят"
 
@@ -3161,6 +3161,12 @@ class AccountsFrame(ctk.CTkFrame):
                         app = getattr(self, "app", None)
                         if ph and app and hasattr(app, "get_busy_accounts"):
                             busy = app.get_busy_accounts()
+                            try:
+                                import ads_gui as _ads_gui
+                                for ads_phone in _ads_gui.get_running_ads_account_phones():
+                                    busy.setdefault(ads_phone, "Объявления")
+                            except Exception:
+                                pass
                             ctx = busy.get(ph, "")
                             if ctx:
                                 busy_label = self._busy_display(ctx)

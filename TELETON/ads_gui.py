@@ -33,6 +33,7 @@ from ads_scheduler import AdsScheduler, clamp_settings
 
 _ADS_SCHEDULERS_GUARD = threading.Lock()
 _ADS_RUNNING_SCHEDULERS: dict[str, AdsScheduler] = {}
+_ADS_BUSY_CONTEXT = "Объявления"
 
 
 def _ads_scheduler_alive(scheduler: AdsScheduler) -> bool:
@@ -46,6 +47,22 @@ def _prune_ads_schedulers_locked():
     for phone, scheduler in list(_ADS_RUNNING_SCHEDULERS.items()):
         if not _ads_scheduler_alive(scheduler):
             _ADS_RUNNING_SCHEDULERS.pop(phone, None)
+
+
+def get_running_ads_account_phones() -> list[str]:
+    with _ADS_SCHEDULERS_GUARD:
+        _prune_ads_schedulers_locked()
+        return list(_ADS_RUNNING_SCHEDULERS.keys())
+
+
+def _mark_ads_busy(app, phones):
+    if hasattr(app, "mark_account_busy"):
+        app.mark_account_busy(phones, _ADS_BUSY_CONTEXT)
+
+
+def _mark_ads_free(app, phones):
+    if hasattr(app, "mark_account_free"):
+        app.mark_account_free(phones)
 
 
 def stop_all_ads_schedulers(log_cb=None) -> int:
@@ -1406,6 +1423,7 @@ class SchedulerTab(ctk.CTkFrame):
         with _ADS_SCHEDULERS_GUARD:
             _ADS_RUNNING_SCHEDULERS[account.phone] = self._scheduler
         self._scheduler.start()
+        _mark_ads_busy(self.app, [account.phone])
         self.lbl_status.configure(
             text="▶ Работает", text_color="green4")
         self.btn_start.configure(state="disabled")
@@ -1425,6 +1443,7 @@ class SchedulerTab(ctk.CTkFrame):
                 with _ADS_SCHEDULERS_GUARD:
                     if _ADS_RUNNING_SCHEDULERS.get(scheduler.account_phone) is scheduler:
                         _ADS_RUNNING_SCHEDULERS.pop(scheduler.account_phone, None)
+                _mark_ads_free(self.app, [scheduler.account_phone])
                 if self._scheduler is scheduler:
                     self._scheduler = None
         if stopped:
@@ -1962,6 +1981,7 @@ class QuickLaunchTab(ctk.CTkFrame):
             main_db.close()
 
         started = 0
+        started_phones: list[str] = []
         with _ADS_SCHEDULERS_GUARD:
             _prune_ads_schedulers_locked()
             for p in phones:
@@ -1994,8 +2014,10 @@ class QuickLaunchTab(ctk.CTkFrame):
                 self._schedulers[p] = sch
                 sch.start()
                 started += 1
+                started_phones.append(p)
 
         if started:
+            _mark_ads_busy(self.app, started_phones)
             self.btn_start.configure(state="disabled")
             self.btn_stop.configure(state="normal")
             self.lbl_status.configure(text=f"Статус: работает ({started})", text_color="green4")
@@ -2012,6 +2034,7 @@ class QuickLaunchTab(ctk.CTkFrame):
             return
 
         still_running = {}
+        stopped_phones = []
         for p, sch in schedulers.items():
             try:
                 stopped = sch.stop()
@@ -2021,10 +2044,13 @@ class QuickLaunchTab(ctk.CTkFrame):
                 with _ADS_SCHEDULERS_GUARD:
                     if _ADS_RUNNING_SCHEDULERS.get(p) is sch:
                         _ADS_RUNNING_SCHEDULERS.pop(p, None)
+                stopped_phones.append(p)
             else:
                 still_running[p] = sch
 
         self._schedulers = still_running
+        if stopped_phones:
+            _mark_ads_free(self.app, stopped_phones)
         if still_running:
             self.btn_start.configure(state="disabled")
             self.btn_stop.configure(state="normal")
