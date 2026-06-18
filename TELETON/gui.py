@@ -23,6 +23,7 @@ import autoreply
 import channel_commenter
 from config import Config
 from database import Database
+from diagnostics import human_reason, human_exception
 from models import Account, Task, SendLog, ACCOUNT_STATUS_ACTIVE, ACCOUNT_STATUS_NEEDS_REAUTH, ACCOUNT_STATUS_BANNED, ACCOUNT_STATUS_NETWORK_ISSUE
 
 HELP_TEXTS = {}
@@ -2950,6 +2951,7 @@ class AccountsFrame(ctk.CTkFrame):
     def __init__(self, master, app):
         super().__init__(master, fg_color="transparent")
         self.app = app
+        self._diagnostics_after_id = None
 
         # Заголовок с акцентом
         header = ctk.CTkFrame(self, fg_color="transparent")
@@ -10821,7 +10823,7 @@ class BroadcastFrame(ctk.CTkFrame):
             text = self._progress_brief(payload)
             err = payload.get("error") or payload.get("status") or ""
             if err:
-                text = f"{text}: {self._shorten_ui(err, 42)}"
+                text = f"{text}: {self._shorten_ui(human_reason(err), 70)}"
             state["last_errors"] = [text] + [x for x in state.get("last_errors", []) if x != text]
         elif event == "stopping":
             state["state"] = "stopping"
@@ -10856,7 +10858,7 @@ class BroadcastFrame(ctk.CTkFrame):
         base = self._task_brief(task)
         detail = getattr(task, "last_error", "") or getattr(task, "status", "") or ""
         if detail:
-            return self._shorten_ui(f"{base}: {detail}", 140)
+            return self._shorten_ui(f"{base}: {human_reason(detail)}", 140)
         return base
 
     def _shorten_ui(self, text: str, limit: int = 100) -> str:
@@ -12969,6 +12971,29 @@ class StatsFrame(ctk.CTkFrame):
             val_label.pack(padx=8, pady=(0, 5))
             self.stat_labels[key] = val_label
 
+        ctk.CTkLabel(content, text="Диагностика", font=ctk.CTkFont(size=14, weight="bold")).pack(
+            padx=12, pady=(12, 3), anchor="w")
+
+        diag_frame = ctk.CTkFrame(content, corner_radius=8, border_width=1,
+                                  border_color=("gray70", "gray40"))
+        diag_frame.pack(padx=12, pady=4, fill="x")
+        diag_frame.grid_columnconfigure(1, weight=1)
+        diag_frame.grid_columnconfigure(3, weight=1)
+
+        self.diag_labels = {}
+        for row, (key, label) in enumerate([
+            ("accounts", "Аккаунты"),
+            ("tasks", "Задачи"),
+            ("errors", "Ошибки"),
+            ("runtime", "Работает сейчас"),
+            ("recent", "Последние причины"),
+        ]):
+            ctk.CTkLabel(diag_frame, text=f"{label}:", font=ctk.CTkFont(weight="bold"),
+                         anchor="w").grid(row=row, column=0, padx=10, pady=4, sticky="w")
+            value = ctk.CTkLabel(diag_frame, text="—", anchor="w", justify="left", wraplength=860)
+            value.grid(row=row, column=1, columnspan=3, padx=8, pady=4, sticky="ew")
+            self.diag_labels[key] = value
+
         # === Таблица по аккаунтам (с дыханием) ===
         ctk.CTkLabel(content, text="По аккаунтам", font=ctk.CTkFont(size=14, weight="bold")).pack(
             padx=12, pady=(10, 3), anchor="w")
@@ -12978,6 +13003,7 @@ class StatsFrame(ctk.CTkFrame):
         self.per_acc_table.pack(padx=12, pady=4, fill="both", expand=True)
 
         self.refresh()
+        self._schedule_diagnostics_refresh()
 
     def refresh(self):
         days_str = self.days_entry.get().strip()
@@ -12986,6 +13012,7 @@ class StatsFrame(ctk.CTkFrame):
         db = Database(self.app.config.db_path)
         stats = db.get_stats(days)
         per_acc = db.get_per_account_stats(days)
+        diagnostics_snapshot = db.get_diagnostics_snapshot(days)
         db.close()
 
         for key, label in self.stat_labels.items():
@@ -12994,6 +13021,97 @@ class StatsFrame(ctk.CTkFrame):
         # Per-account
         rows = [(p["phone"], p["status"], p["count"]) for p in per_acc]
         self.per_acc_table.set_data(rows)
+        self._update_diagnostics_panel(diagnostics_snapshot)
+
+    def _update_diagnostics_panel(self, snapshot: dict):
+        if not hasattr(self, "diag_labels"):
+            return
+        accounts = (snapshot or {}).get("accounts", {})
+        tasks = (snapshot or {}).get("tasks", {})
+        errors = (snapshot or {}).get("errors", {})
+        runtime = self._get_runtime_diagnostics()
+
+        self.diag_labels["accounts"].configure(text=(
+            f"активно: {accounts.get('enabled', 0)} | доступно сейчас: {accounts.get('available', 0)} | "
+            f"flood wait: {accounts.get('flood_wait', 0)} | reauth: {accounts.get('needs_reauth', 0)} | "
+            f"proxy/network: {accounts.get('network_issue', 0)} | ошибок сегодня: {accounts.get('errors_today', 0)}"
+        ))
+        self.diag_labels["tasks"].configure(text=(
+            f"всего: {tasks.get('total', 0)} | готово: {tasks.get('pending', 0)} | "
+            f"ожидание: {tasks.get('waiting', 0)} | ошибки: {tasks.get('error', 0)} | "
+            f"выполнено: {tasks.get('done', 0)}"
+        ))
+        by_status = errors.get("by_status", {}) or {}
+        status_text = ", ".join(
+            f"{human_reason(status)}: {count}"
+            for status, count in sorted(by_status.items())
+        )
+        self.diag_labels["errors"].configure(
+            text=f"за период: {errors.get('total', 0)}" + (f" | {status_text}" if status_text else "")
+        )
+        self.diag_labels["runtime"].configure(text=runtime)
+
+        recent = errors.get("recent", []) or []
+        if recent:
+            items = []
+            for item in recent[:3]:
+                account = item.get("account") or "—"
+                target = item.get("target") or "—"
+                items.append(f"{account} → {target}: {item.get('reason') or human_reason(item.get('status', ''))}")
+            self.diag_labels["recent"].configure(text=" | ".join(items))
+        else:
+            self.diag_labels["recent"].configure(text="нет свежих ошибок")
+
+    def _get_runtime_diagnostics(self) -> str:
+        parts = []
+        try:
+            bf = getattr(self.app, "frames", {}).get("broadcast")
+            if bf:
+                if getattr(bf, "_running", False):
+                    parts.append(getattr(bf, "_active_op_name", "") or "broadcast")
+                cycle_names = []
+                if hasattr(bf, "_cycle_active_names"):
+                    cycle_names = bf._cycle_active_names()
+                if cycle_names:
+                    parts.append("циклы: " + ", ".join(cycle_names[:4]))
+        except Exception:
+            pass
+
+        try:
+            import ads_gui as _ads_gui
+            with _ads_gui._ADS_SCHEDULERS_GUARD:
+                _ads_gui._prune_ads_schedulers_locked()
+                phones = list(_ads_gui._ADS_RUNNING_SCHEDULERS.keys())
+            if phones:
+                parts.append("ads: " + ", ".join(phones[:4]))
+        except Exception:
+            pass
+
+        return " | ".join(parts) if parts else "нет активных процессов"
+
+    def _schedule_diagnostics_refresh(self):
+        try:
+            if not self.winfo_exists():
+                return
+            self._diagnostics_after_id = self.after(8000, self._diagnostics_tick)
+        except Exception:
+            self._diagnostics_after_id = None
+
+    def _diagnostics_tick(self):
+        self._diagnostics_after_id = None
+        try:
+            self.refresh()
+        finally:
+            self._schedule_diagnostics_refresh()
+
+    def destroy(self):
+        try:
+            after_id = getattr(self, "_diagnostics_after_id", None)
+            if after_id:
+                self.after_cancel(after_id)
+        except Exception:
+            pass
+        super().destroy()
 
 
 class SettingsFrame(ctk.CTkFrame):

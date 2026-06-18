@@ -38,6 +38,7 @@ from models import (
 )
 from database import Database
 from config import Config, OWN_API_ID, OWN_API_HASH
+from diagnostics import human_action_block_reason, human_exception, human_reason
 from file_logger import log_event
 
 
@@ -404,6 +405,7 @@ class TelegramSender:
             if reason == "min_interval" and wait_s > 0 and _retry < 3:
                 await asyncio.sleep(min(wait_s, 5.0))
                 return await self.send_mention_message(group, text, entities, _retry + 1)
+            print(f"  [!] {self.account.phone}: действие пропущено — {human_action_block_reason(reason, wait_s)}")
             self.db.log_account_action(self.account.phone, "group", group, "skip", reason)
             log_event(module="sender", campaign="", account=self.account.phone, target=group,
                       action="send_group", status="skip", error=reason)
@@ -423,6 +425,7 @@ class TelegramSender:
             return f"sent:{msg_id}" if msg_id else "sent"
 
         except FloodWaitError as e:
+            print(f"  [!] {human_exception(e)}")
             if _retry < 3:
                 print(f"  [!] FloodWait {e.seconds}s — ожидание...")
                 await asyncio.sleep(e.seconds)
@@ -439,6 +442,7 @@ class TelegramSender:
 
         except SlowModeWaitError as e:
             wait = max(getattr(e, "seconds", 0) or 0, 1)
+            print(f"  [!] {group}: {human_reason('slow_mode', wait_seconds=wait)}")
             print(f"  [!] SlowModeWait {wait}s в {group}")
             self.db.log_account_action(self.account.phone, "group", group, "slow_mode", str(wait))
             log_event(module="sender", campaign="", account=self.account.phone, target=group,
@@ -446,6 +450,7 @@ class TelegramSender:
             return f"slow_mode:{wait}"
 
         except PeerFloodError:
+            print(f"  [!] {self.account.phone}: {human_reason('banned', 'PeerFloodError')}")
             print(f"  [!] PeerFloodError — деактивация {self.account.phone}")
             self.db.deactivate_account(self.account.phone)
             self.db.log_account_action(self.account.phone, "group", group, "banned", "PeerFloodError")
@@ -454,6 +459,7 @@ class TelegramSender:
             return "banned"
 
         except UserBannedInChannelError:
+            print(f"  [!] {group}: {human_reason('chat_banned', 'UserBannedInChannelError')}")
             print(f"  [!] Аккаунт забанен в канале {group} (per-target, не глобальный бан)")
             self.db.log_account_action(self.account.phone, "group", group, "chat_banned", "UserBannedInChannelError")
             log_event(module="sender", campaign="", account=self.account.phone, target=group,
@@ -461,6 +467,7 @@ class TelegramSender:
             return "chat_banned"
 
         except ChatGuestSendForbiddenError as e:
+            print(f"  [!] {group}: {human_reason('need_subscription', str(e))}")
             print(f"  [!] Для отправки в {group} нужна подписка/вступление: {e}")
             self.db.log_account_action(self.account.phone, "group", group, "need_subscription", str(e)[:200])
             log_event(module="sender", campaign="", account=self.account.phone, target=group,
@@ -468,6 +475,7 @@ class TelegramSender:
             return "need_subscription"
 
         except (ChatWriteForbiddenError, ChatAdminRequiredError):
+            print(f"  [!] {group}: {human_reason('no_permission')}")
             print(f"  [!] Нет прав на запись в {group}")
             self.db.log_account_action(self.account.phone, "group", group, "no_permission", "")
             log_event(module="sender", campaign="", account=self.account.phone, target=group,
@@ -475,6 +483,7 @@ class TelegramSender:
             return "no_permission"
 
         except ChannelPrivateError:
+            print(f"  [!] {group}: {human_reason('private')}")
             print(f"  [!] Группа {group} приватная / недоступна")
             self.db.log_account_action(self.account.phone, "group", group, "private", "")
             log_event(module="sender", campaign="", account=self.account.phone, target=group,
@@ -482,6 +491,7 @@ class TelegramSender:
             return "private"
 
         except Exception as e:
+            print(f"  [-] {group}: {human_exception(e)}")
             print(f"  [-] Ошибка в {group}: {e}")
             self.db.log_account_action(self.account.phone, "group", group, "error", str(e)[:200])
             log_event(module="sender", campaign="", account=self.account.phone, target=group,
@@ -517,6 +527,7 @@ class TelegramSender:
             if reason == "min_interval" and wait_s > 0 and _retry < 3:
                 await asyncio.sleep(min(wait_s, 5.0))
                 return await self.send_dm(user_id, username, message, access_hash, _retry + 1)
+            print(f"  [!] {self.account.phone}: DM пропущен — {human_action_block_reason(reason, wait_s)}")
             _log("error", f"limiter:{reason}")
             self.db.log_account_action(self.account.phone, "dm", str(target), "skip", reason)
             log_event(module="sender", campaign="", account=self.account.phone, target=str(target),
@@ -550,6 +561,7 @@ class TelegramSender:
             return "sent"
 
         except UserPrivacyRestrictedError:
+            print(f"  [!] {target}: {human_reason('private', 'UserPrivacyRestrictedError')}")
             print(f"  [!] Приватность запрещает DM → {target}")
             _log("private")
             self.db.log_account_action(self.account.phone, "dm", str(target), "private", "")
@@ -558,6 +570,7 @@ class TelegramSender:
             return "private"
 
         except FloodWaitError as e:
+            print(f"  [!] {human_exception(e)}")
             if _retry < 3:
                 print(f"  [!] FloodWait {e.seconds}s — ожидание...")
                 await asyncio.sleep(e.seconds)
@@ -573,6 +586,7 @@ class TelegramSender:
                 return "flood_wait"
 
         except PeerFloodError:
+            print(f"  [!] {self.account.phone}: {human_reason('banned', 'PeerFloodError')}")
             print(f"  [!] PeerFloodError — деактивация {self.account.phone}")
             self.db.deactivate_account(self.account.phone)
             _log("banned", "PeerFloodError")
@@ -583,7 +597,9 @@ class TelegramSender:
 
         except Exception as e:
             msg = str(e)
+            print(f"  [-] DM → {target}: {human_exception(e)}")
             if "Could not find the input entity for" in msg:
+                print(f"  [-] {target}: {human_reason('error', 'не найден получатель; нужен username или access_hash')}")
                 hint = "no_input_entity: нет access_hash/username для резолва. Переспарси аудиторию этим аккаунтом или экспортируй/импортируй с username."
                 print(f"  [-] Ошибка DM → {target}: {msg}")
                 _log("error", hint[:200])

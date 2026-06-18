@@ -8,6 +8,7 @@ from models import (
     ACCOUNT_STATUS_ACTIVE, ACCOUNT_STATUS_NEEDS_REAUTH,
     ACCOUNT_STATUS_BANNED, ACCOUNT_STATUS_NETWORK_ISSUE,
 )
+from diagnostics import human_reason
 
 
 SCHEMA_VERSION = 18
@@ -827,7 +828,7 @@ class Database:
                 "proxy": acc.proxy or "",
                 "is_active": bool(acc.is_active),
                 "health": state,
-                "why": why,
+                "why": human_reason(state, why) if why else "",
                 "last_check_ok_at": acc.last_check_ok_at,
                 "last_send_at": acc.last_send_at,
                 "sent_today": int(acc.sent_today or 0),
@@ -2054,6 +2055,133 @@ class Database:
             {"phone": phone, "status": status, "count": count}
             for (phone, status), count in sorted(combined.items())
         ]
+
+    def get_diagnostics_snapshot(self, days: int = 1) -> dict:
+        """Read-only aggregate diagnostics for the GUI dashboard."""
+        try:
+            days = max(1, int(days or 1))
+        except Exception:
+            days = 1
+
+        health_rows = self.get_accounts_health()
+        account_counts = {
+            "total": len(health_rows),
+            "enabled": sum(1 for h in health_rows if h.get("is_active")),
+            "available": 0,
+            "active": 0,
+            "inactive": 0,
+            "flood_wait": 0,
+            "paused": 0,
+            "needs_reauth": 0,
+            "banned": 0,
+            "network_issue": 0,
+            "errors_today": sum(int(h.get("error_today", 0) or 0) for h in health_rows),
+        }
+        for h in health_rows:
+            state = (h.get("health") or "active").strip().lower()
+            account_counts[state] = account_counts.get(state, 0) + 1
+            if h.get("is_active") and state == "active":
+                account_counts["available"] += 1
+
+        task_rows = self.conn.execute("""
+            SELECT
+                COALESCE(status, 'pending') AS status,
+                COALESCE(completed, 0) AS completed,
+                COUNT(*) AS cnt
+            FROM tasks
+            WHERE task_type = 'broadcast'
+            GROUP BY COALESCE(status, 'pending'), COALESCE(completed, 0)
+        """).fetchall()
+        task_counts = {
+            "total": 0,
+            "pending": 0,
+            "waiting": 0,
+            "error": 0,
+            "done": 0,
+        }
+        for row in task_rows:
+            cnt = int(row["cnt"] or 0)
+            status = (row["status"] or "pending").strip() or "pending"
+            completed = bool(row["completed"])
+            task_counts["total"] += cnt
+            if completed or status == "done":
+                task_counts["done"] += cnt
+            elif status in task_counts:
+                task_counts[status] += cnt
+            else:
+                task_counts["pending"] += cnt
+
+        error_statuses = (
+            "error", "flood_wait", "slow_mode", "banned", "chat_banned",
+            "no_permission", "private", "need_subscription", "forbidden",
+            "not_member", "unavailable",
+        )
+        error_counts: dict[str, int] = {}
+        placeholders = ",".join("?" for _ in error_statuses)
+
+        for table, time_col in (("send_log", "timestamp"), ("publications_log", "time")):
+            if not self._table_exists(table):
+                continue
+            rows = self.conn.execute(f"""
+                SELECT status, COUNT(*) AS cnt
+                FROM {table}
+                WHERE {time_col} >= date('now', ?)
+                  AND status IN ({placeholders})
+                GROUP BY status
+            """, (f"-{days} days", *error_statuses)).fetchall()
+            for row in rows:
+                status = (row["status"] or "error").strip() or "error"
+                error_counts[status] = error_counts.get(status, 0) + int(row["cnt"] or 0)
+
+        recent_errors = []
+        send_recent = self.conn.execute(f"""
+            SELECT account_phone, target_group AS target, status, error_detail AS detail, timestamp AS ts
+            FROM send_log
+            WHERE timestamp >= date('now', ?)
+              AND status IN ({placeholders})
+            ORDER BY timestamp DESC
+            LIMIT 8
+        """, (f"-{days} days", *error_statuses)).fetchall()
+        for row in send_recent:
+            recent_errors.append({
+                "source": "send",
+                "account": row["account_phone"] or "",
+                "target": row["target"] or "",
+                "status": row["status"] or "",
+                "reason": human_reason(row["status"] or "", row["detail"] or ""),
+                "time": row["ts"] or "",
+            })
+
+        if self._table_exists("publications_log"):
+            ads_recent = self.conn.execute(f"""
+                SELECT account_phone, group_id AS target, status, error_text AS detail, time AS ts
+                FROM publications_log
+                WHERE time >= date('now', ?)
+                  AND status IN ({placeholders})
+                ORDER BY time DESC
+                LIMIT 8
+            """, (f"-{days} days", *error_statuses)).fetchall()
+            for row in ads_recent:
+                recent_errors.append({
+                    "source": "ads",
+                    "account": row["account_phone"] or "",
+                    "target": str(row["target"] or ""),
+                    "status": row["status"] or "",
+                    "reason": human_reason(row["status"] or "", row["detail"] or ""),
+                    "time": row["ts"] or "",
+                })
+
+        recent_errors.sort(key=lambda item: item.get("time", ""), reverse=True)
+        return {
+            "days": days,
+            "accounts": account_counts,
+            "tasks": task_counts,
+            "errors": {
+                "total": sum(error_counts.values()),
+                "by_status": error_counts,
+                "recent": recent_errors[:8],
+            },
+        }
 
     # --- Proxy pool ---
 

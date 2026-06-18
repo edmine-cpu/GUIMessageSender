@@ -34,6 +34,7 @@ from ads_models import (
 )
 from ads_publisher import publish_to_group, build_publication_log
 from ads_subscriptions import SubscriptionManager
+from diagnostics import human_exception, human_reason
 from file_logger import log_to_file
 
 # ─── Hard limits ────────────────────────────────────────────────────────────
@@ -483,6 +484,7 @@ class AdsScheduler:
             self._client = client
             return client
         except Exception as e:
+            self.log_cb(f"[-] {self.account_phone}: {human_exception(e)}")
             self.log_cb(f"[-] Не удалось подключить клиент {self.account_phone}: {e}")
             if client is not None:
                 try:
@@ -599,6 +601,7 @@ class AdsScheduler:
         text = adaptation.text if adaptation else ad.text_base
 
         if not text:
+            self.log_cb(f"[!] Объявление #{ad.id}: {human_reason('empty_text')}")
             self.log_cb(f"[!] Пустой текст объявления #{ad.id}, пропускаем")
             return
 
@@ -615,6 +618,7 @@ class AdsScheduler:
             sub_mgr = SubscriptionManager(db, self.account_phone, settings)
             subs_ok = await sub_mgr.ensure_subscriptions(client, group.id)
             if not subs_ok:
+                self.log_cb(f"[!] {group.link}: {human_reason('need_subscription')}")
                 self.log_cb(
                     f"[!] Не выполнены подписки для {group.link}, откладываем")
                 return
@@ -623,6 +627,7 @@ class AdsScheduler:
 
             decision, reason, retry_after = await ensure_chat_access(client, group.link)
             if decision != "ok":
+                self.log_cb(f"[!] {group.link}: {human_reason(reason)}")
                 db.set_group_join_status(group.id, "not_member")
                 if retry_after:
                     db.set_group_retry_after(group.id, retry_after, f"join:{reason}")
@@ -684,6 +689,7 @@ class AdsScheduler:
                     f"след. в эту группу через {group_delay/60:.1f}м, "
                     f"глобально через {global_delay/60:.1f}м")
             else:
+                self.log_cb(f"[!] {group.link}: {human_reason(result.status, result.error_text)}")
                 self.log_cb(
                     f"[!] Ошибка публикации в {group.link}: "
                     f"{result.status} — {result.error_text[:100]}")
