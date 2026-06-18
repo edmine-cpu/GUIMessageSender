@@ -11,7 +11,7 @@ from models import (
 from diagnostics import human_reason
 
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 
 # Cooldown для network_issue — через сколько пробуем reconnect
 NETWORK_RECOVERY_MINUTES = 5
@@ -412,6 +412,12 @@ class Database:
             for col_def in v18_campaign_columns:
                 self._add_column_if_missing(cur, "cycle_campaigns", col_def)
 
+        # v19: cycle campaign action limiter. 0 means no per-day stop for long-running cycles.
+        if current_version < 19:
+            self._add_column_if_missing(
+                cur, "cycle_campaigns", "daily_actions_limit INTEGER NOT NULL DEFAULT 0"
+            )
+
         cur.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self.conn.commit()
 
@@ -718,7 +724,8 @@ class Database:
                 except Exception:
                     pass
 
-            if int(acc.actions_today or 0) >= int(daily_actions_limit or 0):
+            daily_actions_limit = int(daily_actions_limit or 0)
+            if daily_actions_limit > 0 and int(acc.actions_today or 0) >= daily_actions_limit:
                 until = datetime.combine(date.today() + timedelta(days=1), datetime.min.time()).isoformat(timespec="seconds")
                 self.conn.execute(
                     "UPDATE accounts SET paused_until=?, pause_reason=? WHERE phone=?",
@@ -1556,6 +1563,7 @@ class Database:
         default_interval_max_seconds: int | None = None,
         default_min_new_messages: int | None = None,
         default_fallback_hours: int | None = None,
+        daily_actions_limit: int | None = None,
     ):
         now = datetime.now().isoformat(timespec="seconds")
         if send_delay_min_seconds is None:
@@ -1576,6 +1584,7 @@ class Database:
         default_interval_max_seconds = max(default_interval_min_seconds, int(default_interval_max_seconds or default_interval_min_seconds))
         default_min_new_messages = max(0, int(default_min_new_messages or 0))
         default_fallback_hours = max(0, int(default_fallback_hours or 0))
+        daily_actions_limit = max(0, int(daily_actions_limit or 0))
 
         self.conn.execute("""
             UPDATE cycle_campaigns
@@ -1588,6 +1597,7 @@ class Database:
                 , default_hours_start = ?, default_hours_end = ?
                 , default_interval_min_seconds = ?, default_interval_max_seconds = ?
                 , default_min_new_messages = ?, default_fallback_hours = ?
+                , daily_actions_limit = ?
             WHERE id = ?
         """, (
             targets_source, template_id,
@@ -1599,6 +1609,7 @@ class Database:
             default_hours_start, default_hours_end,
             default_interval_min_seconds, default_interval_max_seconds,
             default_min_new_messages, default_fallback_hours,
+            daily_actions_limit,
             campaign_id,
         ))
         self.conn.commit()

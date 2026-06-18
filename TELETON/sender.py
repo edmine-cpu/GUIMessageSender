@@ -392,24 +392,43 @@ class TelegramSender:
         except Exception:
             return True
 
-    async def send_mention_message(self, group: str, text: str, entities: list,
-                                   _retry: int = 0) -> str:
+    async def send_mention_message(
+        self,
+        group: str,
+        text: str,
+        entities: list,
+        _retry: int = 0,
+        min_interval_seconds: float = 2.0,
+        daily_actions_limit: int = 200,
+    ) -> str:
         """
         Отправка сообщения с упоминаниями.
         Возвращает статус: sent / flood_wait / banned / chat_banned / no_permission / private / error / slow_mode
         """
         ok, reason, wait_s = self.db.try_acquire_action_slot(
-            self.account.phone, "group", min_interval_seconds=2.0, daily_actions_limit=200
+            self.account.phone,
+            "group",
+            min_interval_seconds=min_interval_seconds,
+            daily_actions_limit=daily_actions_limit,
         )
         if not ok:
             if reason == "min_interval" and wait_s > 0 and _retry < 3:
                 await asyncio.sleep(min(wait_s, 5.0))
-                return await self.send_mention_message(group, text, entities, _retry + 1)
+                return await self.send_mention_message(
+                    group,
+                    text,
+                    entities,
+                    _retry + 1,
+                    min_interval_seconds=min_interval_seconds,
+                    daily_actions_limit=daily_actions_limit,
+                )
             print(f"  [!] {self.account.phone}: действие пропущено — {human_action_block_reason(reason, wait_s)}")
             self.db.log_account_action(self.account.phone, "group", group, "skip", reason)
             log_event(module="sender", campaign="", account=self.account.phone, target=group,
                       action="send_group", status="skip", error=reason)
-            return "flood_wait" if reason == "flood_wait" else "error"
+            if reason in ("flood_wait", "daily_limit", "paused", "min_interval", "inactive", "needs_reauth", "banned"):
+                return f"{reason}:{int(wait_s)}" if wait_s else reason
+            return "error"
 
         try:
             msg = await asyncio.wait_for(
@@ -429,7 +448,14 @@ class TelegramSender:
             if _retry < 3:
                 print(f"  [!] FloodWait {e.seconds}s — ожидание...")
                 await asyncio.sleep(e.seconds)
-                return await self.send_mention_message(group, text, entities, _retry + 1)
+                return await self.send_mention_message(
+                    group,
+                    text,
+                    entities,
+                    _retry + 1,
+                    min_interval_seconds=min_interval_seconds,
+                    daily_actions_limit=daily_actions_limit,
+                )
             else:
                 print(f"  [!] FloodWait {e.seconds}s — превышен лимит retry")
                 # Ставим аккаунт на паузу до истечения flood
@@ -532,7 +558,9 @@ class TelegramSender:
             self.db.log_account_action(self.account.phone, "dm", str(target), "skip", reason)
             log_event(module="sender", campaign="", account=self.account.phone, target=str(target),
                       action="send_dm", status="skip", error=reason)
-            return "flood_wait" if reason == "flood_wait" else "error"
+            if reason in ("flood_wait", "daily_limit", "paused", "min_interval", "inactive", "needs_reauth", "banned"):
+                return f"{reason}:{int(wait_s)}" if wait_s else reason
+            return "error"
 
         try:
             if norm_username:
@@ -614,9 +642,21 @@ class TelegramSender:
                       action="send_dm", status="error", error=str(e)[:200])
             return "error"
 
-    async def send_broadcast_message(self, group: str, message: str) -> str:
+    async def send_broadcast_message(
+        self,
+        group: str,
+        message: str,
+        min_interval_seconds: float = 2.0,
+        daily_actions_limit: int = 200,
+    ) -> str:
         """Отправка обычного текстового сообщения (broadcast)."""
-        return await self.send_mention_message(group, message, entities=[])
+        return await self.send_mention_message(
+            group,
+            message,
+            entities=[],
+            min_interval_seconds=min_interval_seconds,
+            daily_actions_limit=daily_actions_limit,
+        )
 
     async def get_latest_message_id(self, chat: str) -> int:
         try:

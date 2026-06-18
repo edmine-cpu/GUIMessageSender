@@ -67,6 +67,10 @@ def human_reason(code: str, detail: str = "", wait_seconds: int | None = None) -
             normalized = prefix
             if not raw_detail:
                 raw_detail = rest
+        elif prefix == "daily_actions_limit":
+            normalized = "daily_limit"
+            if not raw_detail:
+                raw_detail = rest
 
     if "proxy" in normalized or "proxy" in detail_l:
         base = "ошибка прокси или сети"
@@ -90,7 +94,7 @@ def human_reason(code: str, detail: str = "", wait_seconds: int | None = None) -
         base = "проблема сети или подключения к Telegram"
     elif normalized in ("session_locked", "database_locked", "in_app_session_busy"):
         base = "сессия или база занята другой операцией"
-    elif normalized in ("daily_limit", "limit"):
+    elif normalized in ("daily_limit", "limit") or "daily_actions_limit" in detail_l:
         base = "достигнут дневной лимит действий"
     elif normalized in ("min_interval", "paused"):
         suffix = _format_wait(wait)

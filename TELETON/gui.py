@@ -2991,10 +2991,13 @@ class AccountsFrame(ctk.CTkFrame):
         # Toolbar — сгруппировано для удобства и красоты (не потеряно ни одной функции)
         toolbar = ctk.CTkFrame(self, fg_color="transparent")
         toolbar.pack(padx=20, pady=8, fill="x")
+        for col in range(4):
+            toolbar.grid_columnconfigure(col, weight=0)
+        toolbar.grid_columnconfigure(4, weight=1)
 
         # Группа 1: Управление аккаунтом (самое частое)
         grp1 = ctk.CTkFrame(toolbar, fg_color=("#1F2937", "#111827"), corner_radius=8)
-        grp1.pack(side="left", padx=(0, 8))
+        grp1.grid(row=0, column=0, padx=(0, 8), pady=(0, 6), sticky="w")
         self.btn_toggle = ctk.CTkButton(grp1, text="Вкл/Выкл", width=95, height=32,
                                         fg_color=("#2563EB", "#1D4ED8"), command=self._toggle_account)
         self.btn_toggle.pack(side="left", padx=4, pady=4)
@@ -3010,7 +3013,7 @@ class AccountsFrame(ctk.CTkFrame):
 
         # Группа 2: Импорт
         grp2 = ctk.CTkFrame(toolbar, fg_color=("#1F2937", "#111827"), corner_radius=8)
-        grp2.pack(side="left", padx=4)
+        grp2.grid(row=0, column=1, padx=4, pady=(0, 6), sticky="w")
         self.btn_import = ctk.CTkButton(grp2, text="Импорт сессий", width=110, height=32,
                                         fg_color=("gray55", "gray28"), command=self._import_sessions)
         self.btn_import.pack(side="left", padx=4, pady=4)
@@ -3020,7 +3023,7 @@ class AccountsFrame(ctk.CTkFrame):
 
         # Группа 3: Сеть / вспомогательное
         grp3 = ctk.CTkFrame(toolbar, fg_color=("#1F2937", "#111827"), corner_radius=8)
-        grp3.pack(side="left", padx=4)
+        grp3.grid(row=0, column=2, padx=4, pady=(0, 6), sticky="w")
         self.btn_proxy = ctk.CTkButton(grp3, text="Прокси", width=75, height=32,
                                        fg_color=("gray55", "gray28"), command=self._set_proxy)
         self.btn_proxy.pack(side="left", padx=4, pady=4)
@@ -3033,7 +3036,7 @@ class AccountsFrame(ctk.CTkFrame):
 
         # Группа 4: Выделение (маленькие)
         grp4 = ctk.CTkFrame(toolbar, fg_color="transparent")
-        grp4.pack(side="left", padx=4)
+        grp4.grid(row=1, column=0, padx=4, sticky="w")
         self.btn_select_all = ctk.CTkButton(grp4, text="✓ Выбрать", width=80, height=32,
                                             fg_color=("gray50", "gray25"),
                                             command=lambda: self.table.set_all_checked(True))
@@ -3047,7 +3050,7 @@ class AccountsFrame(ctk.CTkFrame):
         # Очень полезна, когда изменения в аккаунты/прокси/метки сделаны извне (скриптами импорта и т.д.)
         # без перезапуска всей программы.
         grp_refresh = ctk.CTkFrame(toolbar, fg_color="transparent")
-        grp_refresh.pack(side="left", padx=(10, 4))
+        grp_refresh.grid(row=1, column=1, padx=(10, 4), sticky="w")
         self.btn_refresh = ctk.CTkButton(
             grp_refresh, text="↻ Обновить", width=105, height=32,
             fg_color=("#2563EB", "#1D4ED8"),
@@ -6755,6 +6758,12 @@ class BroadcastFrame(ctk.CTkFrame):
         self.c_rotate_after_n = ctk.CTkEntry(rules_row3, width=70, placeholder_text="0")
         self.c_rotate_after_n.grid(row=0, column=7, padx=5, pady=3, sticky="w")
 
+        rules_row4 = ctk.CTkFrame(rules, fg_color="transparent")
+        rules_row4.pack(fill="x", padx=0, pady=0)
+        ctk.CTkLabel(rules_row4, text="Дневной лимит действий (0 = выкл):").grid(row=0, column=0, padx=5, pady=3, sticky="w")
+        self.c_daily_limit = ctk.CTkEntry(rules_row4, width=90, placeholder_text="0")
+        self.c_daily_limit.grid(row=0, column=1, padx=5, pady=3, sticky="w")
+
         msg = ctk.CTkFrame(content, fg_color="transparent")
         msg.pack(padx=10, pady=(12, 0), fill="x")
         msg.grid_columnconfigure(1, weight=1)
@@ -6794,18 +6803,19 @@ class BroadcastFrame(ctk.CTkFrame):
 
         btns = ctk.CTkFrame(content, fg_color="transparent")
         btns.pack(padx=10, pady=10, fill="x")
+        btns.grid_columnconfigure(8, weight=1)
         self.btn_cycle_start = ctk.CTkButton(btns, text="▶ Старт", width=140, command=self._start_cycle)
-        self.btn_cycle_start.pack(side="left", padx=(0, 8))
+        self.btn_cycle_start.grid(row=0, column=0, padx=(0, 8), sticky="w")
         self.btn_cycle_stop = ctk.CTkButton(btns, text="■ Стоп", width=140,
                                             state="disabled", fg_color="firebrick",
                                             hover_color="darkred", command=self._stop_cycle)
-        self.btn_cycle_stop.pack(side="left", padx=(0, 8))
+        self.btn_cycle_stop.grid(row=0, column=1, padx=(0, 8), sticky="w")
         self.c_dry_run = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(btns, text="Dry Run", variable=self.c_dry_run).pack(side="left", padx=(8, 0))
+        ctk.CTkCheckBox(btns, text="Dry Run", variable=self.c_dry_run).grid(row=0, column=2, padx=(8, 0), sticky="w")
         ctk.CTkButton(btns, text="↻ Обновить список", width=160,
-                      command=self._cycle_refresh_table).pack(side="left", padx=(8, 0))
+                      command=self._cycle_refresh_table).grid(row=0, column=3, padx=(8, 0), sticky="w")
         ctk.CTkButton(btns, text="Правила чата", width=140,
-                      command=self._cycle_edit_selected).pack(side="right")
+                      command=self._cycle_edit_selected).grid(row=0, column=8, padx=(8, 0), sticky="e")
 
         self.btn_cycle_start_enabled = ctk.CTkButton(
             btns,
@@ -6813,7 +6823,7 @@ class BroadcastFrame(ctk.CTkFrame):
             width=150,
             command=self._cycle_start_enabled_campaigns,
         )
-        self.btn_cycle_start_enabled.pack(side="left", padx=(12, 0))
+        self.btn_cycle_start_enabled.grid(row=0, column=4, padx=(12, 0), sticky="w")
 
         # NEW: one-click button to stop/disable ALL cyclic campaigns (as requested).
         # This stops runners and sets enabled=False for all, so nothing keeps sending in background.
@@ -6824,7 +6834,7 @@ class BroadcastFrame(ctk.CTkFrame):
             hover_color="#5C0000",
             width=200,
             command=self._disable_all_cycle_campaigns,
-        ).pack(side="left", padx=(16, 0))
+        ).grid(row=0, column=5, padx=(16, 0), sticky="w")
 
         status_bar = ctk.CTkFrame(content, fg_color="transparent")
         status_bar.pack(padx=10, pady=(0, 4), fill="x")
@@ -6900,7 +6910,7 @@ class BroadcastFrame(ctk.CTkFrame):
         self._refresh_cycle_templates()
         self._refresh_cycle_campaigns()
         self._cycle_select_campaign(self.c_campaign_var.get())
-        self._cycle_watchdog()
+        # Watchdog is scheduled after the full BroadcastFrame is built.
 
     def _set_cycle_busy(self, busy: bool, status_text: str = ""):
         """Set busy state to prevent overlapping UI ops that cause visual glitches and 'not responding' on weak hardware.
@@ -7147,6 +7157,7 @@ class BroadcastFrame(ctk.CTkFrame):
                     send_delay_min_seconds=int(run_settings["send_delay_min_seconds"]),
                     send_delay_max_seconds=int(run_settings["send_delay_max_seconds"]),
                     round_pause_seconds=int(run_settings["round_pause_seconds"]),
+                    daily_actions_limit=int(run_settings.get("daily_actions_limit", 0)),
                     message_template_id=message_template_id,
                     default_hours_start=int(defaults["hours_start"]),
                     default_hours_end=int(defaults["hours_end"]),
@@ -7380,11 +7391,13 @@ class BroadcastFrame(ctk.CTkFrame):
         smax = max(smin, _i(self.c_send_delay_max, smin))
         rp = max(0, _i(self.c_round_pause, 0))
         rotate_after_n_sends = max(0, _i(self.c_rotate_after_n, 0))
+        daily_actions_limit = max(0, _i(self.c_daily_limit, 0))
         return {
             "send_delay_min_seconds": smin,
             "send_delay_max_seconds": smax,
             "round_pause_seconds": rp,
             "rotate_after_n_sends": rotate_after_n_sends,
+            "daily_actions_limit": daily_actions_limit,
         }
 
     @staticmethod
@@ -7444,6 +7457,7 @@ class BroadcastFrame(ctk.CTkFrame):
                 send_delay_min_seconds=int(run_settings["send_delay_min_seconds"]),
                 send_delay_max_seconds=int(run_settings["send_delay_max_seconds"]),
                 round_pause_seconds=int(run_settings["round_pause_seconds"]),
+                    daily_actions_limit=int(run_settings.get("daily_actions_limit", 0)),
                 message_template_id=message_template_id,
                 default_hours_start=int(defaults["hours_start"]),
                 default_hours_end=int(defaults["hours_end"]),
@@ -8066,6 +8080,7 @@ class BroadcastFrame(ctk.CTkFrame):
         self._cycle_set_entry(self.c_send_delay_max, smax)
         self._cycle_set_entry(self.c_round_pause, rp)
         self._cycle_set_entry(self.c_rotate_after_n, int(camp.get("rotate_after_n_sends", 0) or 0))
+        self._cycle_set_entry(self.c_daily_limit, int(camp.get("daily_actions_limit", 0) or 0))
 
         acc_filter = (camp.get("account_filter") or "").strip()
         if acc_filter:
@@ -8223,9 +8238,9 @@ class BroadcastFrame(ctk.CTkFrame):
         current_pos = int((state or {}).get("current_pos", 0) or 0)
         if total:
             current_pos %= total
-            self._cycle_targets = targets[current_pos:] + targets[:current_pos]
         else:
-            self._cycle_targets = []
+            current_pos = 0
+        self._cycle_targets = targets
 
         rows = []
         for idx, t in enumerate(self._cycle_targets):
@@ -8254,7 +8269,8 @@ class BroadcastFrame(ctk.CTkFrame):
             retry = (t.get("retry_after") or "")[11:16] if t.get("retry_after") else "—"
             last_sent = (t.get("last_sent_at") or "")[11:16] if t.get("last_sent_at") else "—"
             acc = t.get("last_account_phone") or "—"
-            queue_label = "следующий" if idx == 0 else f"+{idx}"
+            queue_offset = (idx - current_pos) % total if total else 0
+            queue_label = "следующий" if queue_offset == 0 else f"+{queue_offset}"
             rows.append((t.get("link", ""), hours, interval, newm, fb, status, retry, last_sent, acc, queue_label))
         self.c_table.set_data(rows)
 
@@ -8452,6 +8468,7 @@ class BroadcastFrame(ctk.CTkFrame):
         send_delay_max_seconds = int(run_settings["send_delay_max_seconds"])
         round_pause_seconds = int(run_settings["round_pause_seconds"])
         rotate_after_n_sends = int(run_settings.get("rotate_after_n_sends", 0) or 0)
+        daily_actions_limit = int(run_settings.get("daily_actions_limit", 0) or 0)
         dry_run = bool(self.c_dry_run.get()) if hasattr(self, "c_dry_run") else False
 
         def _mask_proxy(p: str) -> str:
@@ -8601,6 +8618,7 @@ class BroadcastFrame(ctk.CTkFrame):
                     send_delay_min_seconds=send_delay_min_seconds,
                     send_delay_max_seconds=send_delay_max_seconds,
                     round_pause_seconds=round_pause_seconds,
+                    daily_actions_limit=daily_actions_limit,
                     message_template_id=message_template_id if message_source == "Шаблоны" else None,
                     default_hours_start=int(defaults["hours_start"]),
                     default_hours_end=int(defaults["hours_end"]),
@@ -8628,6 +8646,7 @@ class BroadcastFrame(ctk.CTkFrame):
                 empty_saved_accounts: set[str] = set()
                 templates_cache = _split_message_template_variants(msg_text)
                 first_loop_logged = False
+                last_no_accounts_log_at = 0.0
 
                 def _allowed_hours(now_h: int, hs: int, he: int) -> bool:
                     if hs <= he:
@@ -8751,7 +8770,47 @@ class BroadcastFrame(ctk.CTkFrame):
                             if dry_run:
                                 log_queue.put(("cycle_log", "[DRY] Нет активных аккаунтов для превью"))
                                 break
-                            await _sleep_interruptibly(10, stop_event, op_name="циклическая рассылка")
+                            wait_sleep = 10
+                            now_mono = time.monotonic()
+                            if now_mono - last_no_accounts_log_at >= 60:
+                                wait_items = []
+                                try:
+                                    health_rows = db.get_accounts_health()
+                                    wanted = set(phones or [])
+                                    if not wanted:
+                                        wanted = {h.get("phone") for h in health_rows if h.get("phone") == selected_account_fallback}
+                                    now_dt = datetime.now()
+                                    for h in health_rows:
+                                        phone = h.get("phone") or ""
+                                        if wanted and phone not in wanted:
+                                            continue
+                                        if not h.get("is_active", True):
+                                            continue
+                                        for field in ("paused_until", "flood_until"):
+                                            until_raw = (h.get(field) or "").strip()
+                                            if not until_raw:
+                                                continue
+                                            try:
+                                                until_dt = datetime.fromisoformat(until_raw)
+                                            except Exception:
+                                                continue
+                                            delta = (until_dt - now_dt).total_seconds()
+                                            if delta > 0:
+                                                wait_items.append((delta, phone, field, until_raw, h.get("why") or field))
+                                    if wait_items:
+                                        wait_items.sort(key=lambda item: item[0])
+                                        delta, phone, field, until_raw, why = wait_items[0]
+                                        wait_sleep = max(10, min(int(delta), 300))
+                                        log_queue.put((
+                                            "cycle_log",
+                                            f"[~] Нет активных аккаунтов. Ближайший доступный: {phone} at {until_raw[:19].replace('T', ' ')} ({why}). Остановка остаётся доступной.",
+                                        ))
+                                    else:
+                                        log_queue.put(("cycle_log", "[~] Нет активных аккаунтов. Жду и проверю снова; остановка остаётся доступной."))
+                                except Exception as e:
+                                    log_queue.put(("cycle_log", f"[~] Нет активных аккаунтов; не удалось посчитать ожидание: {type(e).__name__}"))
+                                last_no_accounts_log_at = now_mono
+                            await _sleep_interruptibly(wait_sleep, stop_event, op_name="cycle", progress="no active accounts")
                             continue
 
                         if not acc_pos_init_done and last_acc_phone:
@@ -8763,6 +8822,7 @@ class BroadcastFrame(ctk.CTkFrame):
 
                         current_pos = current_pos % len(targets)
                         made_send = False
+                        account_blocked = False
 
                         for _ in range(len(targets)):
                             if stop_event.is_set():
@@ -9018,7 +9078,11 @@ class BroadcastFrame(ctk.CTkFrame):
                                               action="send", status="dry_run", error="")
                                 else:
                                     raw_status = await _cycle_wait(
-                                        sender.send_broadcast_message(link, final_text),
+                                        sender.send_broadcast_message(
+                                            link,
+                                            final_text,
+                                            daily_actions_limit=daily_actions_limit,
+                                        ),
                                         f"{link}: отправка",
                                         60,
                                         acc.phone,
@@ -9039,7 +9103,38 @@ class BroadcastFrame(ctk.CTkFrame):
                                         timestamp=now.isoformat(timespec="seconds"),
                                     ))
 
-                                if status in ("sent", "dry_run"):
+                                if status in ("daily_limit", "paused", "min_interval"):
+                                    account_blocked = True
+                                    wait_note = error_detail or raw_status or status
+                                    log_queue.put((
+                                        "cycle_log",
+                                        f"[~] {acc.phone}: account limiter {wait_note}; target is not advanced",
+                                    ))
+                                    log_event(
+                                        module="cycle",
+                                        campaign=running_campaign_name,
+                                        account=acc.phone,
+                                        target=link,
+                                        action="send",
+                                        status=status,
+                                        error=wait_note[:200],
+                                    )
+                                    _emit_cycle_progress(
+                                        account=acc.phone,
+                                        current_target=link,
+                                        next_target=next_link_preview,
+                                        last_error=wait_note[:200],
+                                        phase=status,
+                                    )
+                                    if status in ("daily_limit", "paused"):
+                                        acc_pos += 1
+                                        account_send_count = 0
+                                        try:
+                                            db.set_cycle_state_account_send_count(campaign_id, 0)
+                                        except Exception:
+                                            pass
+                                    break
+                                elif status in ("sent", "dry_run"):
                                     msg_id = 0
                                     try:
                                         msg_id = int(raw_status.split(":", 1)[1])
@@ -9228,6 +9323,15 @@ class BroadcastFrame(ctk.CTkFrame):
 
                         if stop_event.is_set():
                             break
+
+                        if account_blocked:
+                            await _sleep_interruptibly(
+                                10,
+                                stop_event,
+                                op_name="cycle",
+                                progress="account limiter",
+                            )
+                            continue
 
                         if dry_run:
                             log_queue.put(("cycle_log", "[=] DRY-RUN: один круг завершён, цикл остановлен"))
@@ -10986,7 +11090,7 @@ class BroadcastFrame(ctk.CTkFrame):
                 run_id = None
             if campaign_name and run_id:
                 runner = self._cycle_get_runner(campaign_name)
-                if isinstance(runner, dict) and runner.get("run_id") and runner.get("run_id") != run_id:
+                if not isinstance(runner, dict) or runner.get("run_id") != run_id:
                     self.log.append(f"[Циклическая] [i] Игнорирую старый сигнал остановки: {campaign_name}")
                     return
             suffix = f": {campaign_name}" if campaign_name else ""
