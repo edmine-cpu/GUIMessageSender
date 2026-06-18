@@ -149,7 +149,21 @@ def test_cycle_runtime_progress_updates_status_snapshot():
     assert '"next_link"' in snapshot
     assert "_cycle_runtime" in snapshot
     status = methods.get("_cycle_update_status", "")
-    assert "следующая цель" in status
+    assert "Следующая цель" in status
+
+
+def test_cycle_status_uses_compact_dashboard_not_duplicate_lines():
+    src = _load_gui_source()
+    methods = _find_class_methods(src, "BroadcastFrame")
+    status = methods.get("_cycle_update_status", "")
+    refresh = methods.get("_cycle_refresh_table", "")
+
+    assert "_cycle_metric_labels" in src
+    assert "_cycle_update_dashboard(metrics" in status
+    assert "summary_top" not in status
+    assert "summary_bottom" not in status
+    assert "lbl_cycle_next" not in src
+    assert "Следующая цель:" not in refresh
 
 
 def test_cycle_worker_emits_progress_for_attempt_and_result():

@@ -6787,26 +6787,52 @@ class BroadcastFrame(ctk.CTkFrame):
         self._cycle_ui_busy = False
         self._cycle_busy = False  # protects UI from rapid clicks + background updates causing "floating" layout and "not responding" on weak hardware
 
-        # Summary row + main targets table (these were accidentally moved inside _set_cycle_busy during previous edits — restored to build time).
+        # Compact cycle dashboard + main targets table.
+        self._cycle_metric_labels = {}
+        cycle_metrics = ctk.CTkFrame(content, fg_color="transparent")
+        cycle_metrics.pack(padx=10, pady=(0, 6), fill="x")
+        for col in range(9):
+            cycle_metrics.grid_columnconfigure(col, weight=1)
+
+        metric_defs = [
+            ("status", "Статус", "остановлен"),
+            ("campaigns", "Кампаний", "0"),
+            ("position", "Позиция", "—"),
+            ("targets", "Целей", "0"),
+            ("active", "Активных", "0"),
+            ("waiting", "Ожидание", "0"),
+            ("target_errors", "Ошибок целей", "0"),
+            ("sent", "Sent", "0"),
+            ("err", "Err", "0"),
+        ]
+        for col, (key, title, value) in enumerate(metric_defs):
+            card = ctk.CTkFrame(cycle_metrics, corner_radius=6)
+            card.grid(row=0, column=col, padx=(0 if col == 0 else 4, 0), sticky="ew")
+            ctk.CTkLabel(
+                card,
+                text=title,
+                text_color="gray65",
+                font=ctk.CTkFont(size=10),
+                anchor="w",
+            ).pack(padx=8, pady=(5, 0), anchor="w")
+            value_label = ctk.CTkLabel(
+                card,
+                text=value,
+                font=ctk.CTkFont(size=14, weight="bold"),
+                anchor="w",
+            )
+            value_label.pack(padx=8, pady=(0, 6), anchor="w", fill="x")
+            self._cycle_metric_labels[key] = value_label
+
         self.lbl_cycle_summary = ctk.CTkLabel(
             content,
-            text="Целей: 0 | Позиция: — | Последний аккаунт: — | Последняя отправка: — | Следующая попытка: —",
-            text_color="gray70",
-            anchor="w",
-            justify="left",
-            wraplength=980,
-        )
-        self.lbl_cycle_summary.pack(padx=10, pady=(0, 4), anchor="w", fill="x")
-
-        self.lbl_cycle_next = ctk.CTkLabel(
-            content,
-            text="Следующая цель: —",
+            text="Кампания: — | Текущая цель: — | Следующая цель: — | Аккаунт: — | Успех: — | Следующая попытка: — | Ошибка цели: —",
             text_color="#A9D6FF",
             anchor="w",
             justify="left",
             wraplength=980,
         )
-        self.lbl_cycle_next.pack(padx=10, pady=(0, 8), anchor="w", fill="x")
+        self.lbl_cycle_summary.pack(padx=10, pady=(0, 8), anchor="w", fill="x")
 
         self.c_table = ScrollableTable(content, columns=[
             "Чат", "Часы", "Интервал", "Новых", "Часов", "Статус", "Retry", "Последнее", "Аккаунт", "Очередь"])
@@ -7384,6 +7410,18 @@ class BroadcastFrame(ctk.CTkFrame):
             self.lbl_cycle_summary.configure(text=text, text_color=color)
         except Exception:
             pass
+
+    def _cycle_update_dashboard(self, metrics: dict, details: str, color: str = "gray70"):
+        labels = getattr(self, "_cycle_metric_labels", {}) or {}
+        for key, value in metrics.items():
+            label = labels.get(key)
+            if label is None:
+                continue
+            try:
+                label.configure(text=str(value), text_color=color)
+            except Exception:
+                pass
+        self._cycle_set_summary(details, "#A9D6FF" if color != "gray70" else "gray70")
 
     def _cycle_reject_start(self, message: str, status: str = "ошибка запуска", summary: str | None = None):
         self._append_log(f"[Циклическая] [!] {message}")
@@ -8037,33 +8075,34 @@ class BroadcastFrame(ctk.CTkFrame):
             last_acc = snap["last_account"]
             next_link = self._cycle_short_text(snap.get("next_link", "—"), 68)
             position = f"{(pos + 1) if total else '—'}/{total or '—'}"
-            summary_top = (
-                f"Целей: {total} | активных: {snap['active_targets']} | ожидание: {snap['waiting_targets']} | "
-                f"ошибок целей: {snap['error_targets']} | позиция: {position} | "
-                f"sent={snap['sent_total']} | err={snap['error_total']}"
-            )
-            summary_bottom = (
-                f"Текущая: {current_link} | аккаунт: {last_acc} | "
-                f"следующая цель: {next_link} | "
-                f"попытка: {last_run} | успех: {snap['last_sent_at']} | "
-                f"следующая попытка: {snap['next_retry_at']} | ошибка: {self._cycle_short_text(snap['last_error'], 42)}"
-            )
-            if snap["current_error"] != "—":
-                summary_bottom += f" | ошибка цели: {self._cycle_short_text(snap['current_error'], 42)}"
-            summary = summary_top + "\n" + summary_bottom
             selected_running = self._cycle_runner_alive(self._cycle_get_runner(self._cycle_campaign_name))
             active_count = self._cycle_active_count()
             summary_color = "#2FA572" if selected_running else ("#F39C12" if active_count or snap["enabled"] else "gray70")
-            self._cycle_set_summary(summary, summary_color)
-            if hasattr(self, "lbl_cycle_next"):
-                self.lbl_cycle_next.configure(
-                    text=(
-                        f"Кампания: {self._cycle_campaign_name or '—'} | "
-                        f"текущая цель: {current_link} | следующая цель: {next_link} | "
-                        f"аккаунт: {last_acc} | успех: {snap['last_sent_at']} | "
-                        f"ошибка: {self._cycle_short_text(snap['last_error'], 42)}"
-                    )
-                )
+            status_value = "запущена" if selected_running else ("сохранена" if snap["enabled"] else "остановлен")
+            metrics = {
+                "status": status_value,
+                "campaigns": active_count,
+                "position": position,
+                "targets": total,
+                "active": snap["active_targets"],
+                "waiting": snap["waiting_targets"],
+                "target_errors": snap["error_targets"],
+                "sent": snap["sent_total"],
+                "err": snap["error_total"],
+            }
+            detail_parts = [
+                f"Кампания: {self._cycle_campaign_name or '—'}",
+                f"Текущая цель: {current_link}",
+                f"Следующая цель: {next_link}",
+                f"Аккаунт: {last_acc}",
+                f"Попытка: {last_run}",
+                f"Успех: {snap['last_sent_at']}",
+                f"Следующая попытка: {snap['next_retry_at']}",
+                f"Ошибка: {self._cycle_short_text(snap['last_error'], 42)}",
+            ]
+            if snap["current_error"] != "—":
+                detail_parts.append(f"Ошибка цели: {self._cycle_short_text(snap['current_error'], 42)}")
+            self._cycle_update_dashboard(metrics, " | ".join(detail_parts), summary_color)
             self._cycle_refresh_cycle_buttons()
             if selected_running:
                 if snap["last_error"] != "—":
@@ -8161,20 +8200,6 @@ class BroadcastFrame(ctk.CTkFrame):
             acc = t.get("last_account_phone") or "—"
             queue_label = "следующий" if idx == 0 else f"+{idx}"
             rows.append((t.get("link", ""), hours, interval, newm, fb, status, retry, last_sent, acc, queue_label))
-        if hasattr(self, "lbl_cycle_next"):
-            if self._cycle_targets:
-                next_target = self._cycle_targets[0]
-                next_link = next_target.get("link", "—")
-                last_acc = (state or {}).get("last_account_phone") or "—"
-                self.lbl_cycle_next.configure(
-                    text=(
-                        f"Следующая цель: {next_link} | "
-                        f"позиция {(current_pos + 1) if total else '—'}/{total or '—'} | "
-                        f"последний аккаунт: {last_acc}"
-                    )
-                )
-            else:
-                self.lbl_cycle_next.configure(text="Следующая цель: —")
         self.c_table.set_data(rows)
 
     def _cycle_edit_selected(self):
