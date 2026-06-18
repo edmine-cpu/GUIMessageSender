@@ -1012,6 +1012,7 @@ class ScrollableTable(ctk.CTkScrollableFrame):
     # Цвета выделенной строки (light_mode, dark_mode)
     _SELECTED_BG = ("#3B8ED0", "#1F6AA5")
     _ROW_BG = "transparent"
+    _ALT_ROW_BG = ("#f0f0f0", "#1a1a1a")
 
     def __init__(self, master, columns: list,
                  enable_checkboxes: bool = False,
@@ -1060,6 +1061,12 @@ class ScrollableTable(ctk.CTkScrollableFrame):
         # Тонкая линия-разделитель под заголовком (чтобы строки не "слипались" визуально)
         sep = ctk.CTkFrame(self, height=1, fg_color=("gray70", "gray30"))
         sep.grid(row=1, column=0, sticky="ew", padx=2, pady=(0, 2))
+
+    def _row_default_bg(self, row_idx: int):
+        return self._ALT_ROW_BG if row_idx % 2 == 1 else self._ROW_BG
+
+    def _row_bg(self, row_idx: int, highlight=None):
+        return highlight or self._row_default_bg(row_idx)
 
     def set_on_select(self, callback):
         self._on_select_callback = callback
@@ -1114,7 +1121,7 @@ class ScrollableTable(ctk.CTkScrollableFrame):
                     h = highlights[row_idx] if row_idx < len(highlights) else None
                     frame = self.row_frames[row_idx]
                     if self.selected_index != row_idx:
-                        frame.configure(fg_color=h or self._ROW_BG)
+                        frame.configure(fg_color=self._row_bg(row_idx, h))
                 except Exception:
                     pass
             return
@@ -1148,18 +1155,11 @@ class ScrollableTable(ctk.CTkScrollableFrame):
             offset = 1 if self.enable_checkboxes else 0
 
             h = highlights[row_idx] if row_idx < len(highlights) else None
-            row_frame = ctk.CTkFrame(self, fg_color=h or self._ROW_BG,
+            row_frame = ctk.CTkFrame(self, fg_color=self._row_bg(row_idx, h),
                                      corner_radius=6, cursor="hand2")
             row_frame.grid(row=row_idx + 2, column=0, sticky="ew",
                            padx=2, pady=3)  # хороший отступ, чтобы строки не налезали визуально
             self._apply_column_layout(row_frame, len(row) + offset)
-
-            # Лёгкая чересстрочная подсветка для лучшей читаемости (чтобы не сливалось)
-            if row_idx % 2 == 1 and not h:
-                try:
-                    row_frame.configure(fg_color=("#f0f0f0", "#1a1a1a"))
-                except Exception:
-                    pass
 
             if self.enable_checkboxes:
                 key = self.row_key_fn(row) if self.row_key_fn else row_idx
@@ -1201,7 +1201,7 @@ class ScrollableTable(ctk.CTkScrollableFrame):
             prev_frame = self.row_frames[self.selected_index]
             prev_h = (self._row_highlights[self.selected_index]
                       if self.selected_index < len(self._row_highlights) else None)
-            prev_frame.configure(fg_color=prev_h or self._ROW_BG)
+            prev_frame.configure(fg_color=self._row_bg(self.selected_index, prev_h))
 
         self.selected_index = index
         if index < len(self.row_frames):
@@ -2905,6 +2905,21 @@ class CycleCampaignAccountsDialog(ctk.CTkToplevel):
 class AccountsFrame(ctk.CTkFrame):
     """Раздел: Аккаунты"""
 
+    _BUSY_ROW_BG = ("#DBEAFE", "#1E3A5F")
+
+    def _busy_display(self, context: str) -> str:
+        ctx = (context or "").strip()
+        if not ctx:
+            return "—"
+        low = ctx.lower()
+        if "цикличес" in low or "цикл" in low:
+            return "● Цикл"
+        if "упомин" in low or "mention" in low:
+            return "● Упомин."
+        if any(x in low for x in ("быстрый", "рассыл", "broadcast", "spam", "спам")):
+            return "● Спам"
+        return "● Занят"
+
     def __init__(self, master, app):
         super().__init__(master, fg_color="transparent")
         self.app = app
@@ -2986,12 +3001,12 @@ class AccountsFrame(ctk.CTkFrame):
 
         # Таблица аккаунтов — с хорошим дыханием и читаемостью
         self.table = ScrollableTable(self, columns=[
-            "Телефон", "Метка", "Прокси", "Вкл", "Health", "Почему", "Check", "Send", "Sent", "Actions", "Errors"
+            "Телефон", "Метка", "Прокси", "Вкл", "Работа", "Health", "Почему", "Check", "Send", "Sent", "Actions", "Errors"
         ], enable_checkboxes=True,
             row_key_fn=lambda r: r[0],
-            column_weights=[0, 2, 3, 1, 2, 4, 2, 2, 1, 1, 1, 2],
-            column_minsizes=[34, 110, 160, 70, 120, 220, 120, 120, 70, 80, 70, 80],
-            column_anchors=["w", "w", "w", "center", "w", "w", "w", "w", "center", "center", "center"])
+            column_weights=[0, 2, 1, 2, 0, 1, 1, 3, 1, 1, 0, 0, 0],
+            column_minsizes=[32, 125, 82, 120, 48, 86, 105, 150, 96, 96, 54, 62, 52],
+            column_anchors=["w", "w", "w", "center", "center", "w", "w", "w", "w", "center", "center", "center"])
         self.table.pack(padx=16, pady=8, fill="both", expand=True)
 
         # Лог
@@ -3139,6 +3154,7 @@ class AccountsFrame(ctk.CTkFrame):
                         if any(sig in low for sig in ("бан", "banned", "peerflood", "deactivated", "flood_wait", "нужен переимпорт", "сеть/прокси", "connect:", "network:")):
                             why = letxt
 
+                    busy_label = "—"
                     row_highlight = None
                     try:
                         ph = (h.get("phone") or "").strip()
@@ -3147,8 +3163,8 @@ class AccountsFrame(ctk.CTkFrame):
                             busy = app.get_busy_accounts()
                             ctx = busy.get(ph, "")
                             if ctx:
-                                why = (why or "") + f" | {ctx}"
-                                row_highlight = "#3B82F6"
+                                busy_label = self._busy_display(ctx)
+                                row_highlight = self._BUSY_ROW_BG
                     except Exception:
                         pass
 
@@ -3175,6 +3191,7 @@ class AccountsFrame(ctk.CTkFrame):
                         (h.get("custom_name") or "").strip() or "—",
                         (h.get("proxy") or "—") if (h.get("proxy") or "").strip() else "—",
                         "Да" if h.get("is_active") else "Нет",
+                        busy_label,
                         health_vis,
                         why_display,
                         _fmt_time(h.get("last_check_ok_at", "")),
@@ -3187,7 +3204,7 @@ class AccountsFrame(ctk.CTkFrame):
                 except Exception:
                     # Один проблемный аккаунт (например новый "прогрев") не должен ломать весь refresh
                     try:
-                        rows.append((h.get("phone") or "???", "—", "—", "—", "—", "—", "—", "—", 0, 0, 0))
+                        rows.append((h.get("phone") or "???", "—", "—", "—", "—", "—", "—", "—", "—", 0, 0, 0))
                         highlights.append(None)
                     except Exception:
                         pass
@@ -3299,7 +3316,7 @@ class AccountsFrame(ctk.CTkFrame):
             return
 
         phone = row[0]
-        current_proxy = row[1]
+        current_proxy = row[2] if len(row) > 2 else ""
 
         # Предупреждение если прокси уже задан (смена IP = impossible travel alert)
         if current_proxy and current_proxy != "—":
@@ -6902,11 +6919,16 @@ class BroadcastFrame(ctk.CTkFrame):
 
     # --- Центральный трекинг занятых аккаунтов (для синей подсветки + контекста) ---
     def _ensure_busy_dict(self):
+        if hasattr(self, "app") and hasattr(self.app, "get_busy_accounts"):
+            return
         if not hasattr(self, "_busy_accounts"):
             self._busy_accounts: dict[str, str] = {}
 
     def mark_account_busy(self, phones: str | list[str], context: str):
         """Пометить аккаунт(ы) как занятые в работе (рассылка, парсинг и т.д.)."""
+        if hasattr(self, "app") and hasattr(self.app, "mark_account_busy"):
+            self.app.mark_account_busy(phones, context)
+            return
         self._ensure_busy_dict()
         if isinstance(phones, str):
             phones = [phones]
@@ -6915,6 +6937,9 @@ class BroadcastFrame(ctk.CTkFrame):
                 self._busy_accounts[p] = context
 
     def mark_account_free(self, phones: str | list[str]):
+        if hasattr(self, "app") and hasattr(self.app, "mark_account_free"):
+            self.app.mark_account_free(phones)
+            return
         self._ensure_busy_dict()
         if isinstance(phones, str):
             phones = [phones]
@@ -6922,9 +6947,25 @@ class BroadcastFrame(ctk.CTkFrame):
             self._busy_accounts.pop(p, None)
 
     def get_busy_accounts(self) -> dict[str, str]:
+        if hasattr(self, "app") and hasattr(self.app, "get_busy_accounts"):
+            return self.app.get_busy_accounts()
         self._ensure_busy_dict()
         # Возвращаем копию, чтобы не мутировали извне
         return dict(self._busy_accounts)
+
+    def _runtime_busy_phones(self, selected_account: str, explicit_phones: list[str] | None = None) -> list[str]:
+        if explicit_phones:
+            return [p for p in explicit_phones if (p or "").strip()]
+        selected = (selected_account or "").strip()
+        if not selected or selected == "Нет аккаунтов":
+            return []
+        if selected != "Все активные":
+            return [selected]
+        db = Database(self.app.config.db_path)
+        try:
+            return [a.phone for a in db.get_active_accounts()]
+        finally:
+            db.close()
 
     def _cycle_on_campaign_change(self, name: str):
         old_name = (self._cycle_campaign_name or "").strip()
@@ -9184,6 +9225,11 @@ class BroadcastFrame(ctk.CTkFrame):
             self._append_log(f"[Циклическая] [!] Ошибка регистрации/старта воркера: {e}")
             # Сброс UI чтобы не остаться в ложном "запущен" состоянии (P0 регрессия)
             try:
+                busy = self.get_busy_accounts()
+                self.mark_account_free([
+                    p for p, ctx in busy.items()
+                    if "Циклическая" in (ctx or "") and running_campaign_name in (ctx or "")
+                ])
                 runners = getattr(self, "_cycle_runners", None) or {}
                 runners.pop(running_campaign_name, None)
                 self._cycle_running = bool(self._cycle_active_names())
@@ -9331,7 +9377,14 @@ class BroadcastFrame(ctk.CTkFrame):
                     dbm.get_or_create_cycle_campaign(campaign_name)
                 )
                 dbm.close()
-                self.mark_account_free(camp_phones)
+                if camp_phones:
+                    self.mark_account_free(camp_phones)
+                else:
+                    busy = self.get_busy_accounts()
+                    self.mark_account_free([
+                        p for p, ctx in busy.items()
+                        if "Циклическая" in (ctx or "") and campaign_name in (ctx or "")
+                    ])
             except Exception:
                 pass
             runners.pop(campaign_name, None)
@@ -9345,7 +9398,14 @@ class BroadcastFrame(ctk.CTkFrame):
                             dbm.get_or_create_cycle_campaign(name)
                         )
                         dbm.close()
-                        self.mark_account_free(camp_phones)
+                        if camp_phones:
+                            self.mark_account_free(camp_phones)
+                        else:
+                            busy = self.get_busy_accounts()
+                            self.mark_account_free([
+                                p for p, ctx in busy.items()
+                                if "Циклическая" in (ctx or "") and name in (ctx or "")
+                            ])
                     except Exception:
                         pass
                     runners.pop(name, None)
@@ -9447,19 +9507,6 @@ class BroadcastFrame(ctk.CTkFrame):
         msg_source = (self.q_message_source_var.get() or "Вручную").strip() or "Вручную"
         raw_text = (self.q_message.get("1.0", "end").strip() if hasattr(self, "q_message") else "")
 
-        # Занять аккаунты (синяя подсветка)
-        try:
-            if selected_account == "Все активные":
-                dbq = Database(self.app.config.db_path)
-                phones = [a.phone for a in dbq.get_active_accounts()]
-                dbq.close()
-                if phones:
-                    self.mark_account_busy(phones, "Быстрый старт (массовый)")
-            elif selected_account and selected_account != "Нет аккаунтов":
-                self.mark_account_busy(selected_account, "Быстрый старт (массовый)")
-        except Exception:
-            pass
-
         self.log.clear()
         lines = ["[~] Быстрый старт: запуск ручной рассылки по шаблону."]
         if not self._quick_template_links:
@@ -9516,6 +9563,14 @@ class BroadcastFrame(ctk.CTkFrame):
         if not ok:
             return
 
+        # Занять аккаунты (мягкая подсветка + колонка "Работа")
+        try:
+            phones = self._runtime_busy_phones(selected_account, getattr(self, "_quick_account_phones", None))
+            if phones:
+                self.mark_account_busy(phones, "Быстрый старт (массовый)")
+        except Exception:
+            pass
+
         self._stop_event.clear()
         self._active_op_name = "быстрый старт"
         self._running = True
@@ -9534,6 +9589,13 @@ class BroadcastFrame(ctk.CTkFrame):
         def finish_quick_start(message: str):
             self._running = False
             self._active_op_name = ""
+            try:
+                busy = self.get_busy_accounts()
+                to_free = [p for p, ctx in busy.items() if "Циклическая" not in (ctx or "")]
+                if to_free:
+                    self.mark_account_free(to_free)
+            except Exception:
+                pass
             try:
                 self.log.append(f"[Быстрый старт] {message}")
             except Exception:
@@ -9869,6 +9931,12 @@ class BroadcastFrame(ctk.CTkFrame):
         self.btn_mention.configure(state="disabled", text="Выполняется...")
         self.btn_stop_current.configure(state="normal", text="■ Остановить упоминания")
         self.log.clear()
+        try:
+            phones = self._runtime_busy_phones(selected_account)
+            if phones:
+                self.mark_account_busy(phones, "Упоминания")
+        except Exception:
+            pass
 
         def mention_thread():
             log_queue = self.app.log_queue
@@ -10623,6 +10691,13 @@ class BroadcastFrame(ctk.CTkFrame):
             self._refresh_broadcast_status_panel()
             return
 
+        try:
+            phones = self._runtime_busy_phones(selected_account)
+            if phones:
+                self.mark_account_busy(phones, "Рассылка")
+        except Exception:
+            pass
+
         self._stop_event.clear()
         self._active_op_name = "рассылку"
         self._running = True
@@ -10936,10 +11011,10 @@ class BroadcastFrame(ctk.CTkFrame):
             self.btn_mention.configure(state="normal", text="Начать упоминания")
             # Освободить аккаунты от не-циклических задач
             try:
-                self._ensure_busy_dict()
-                to_free = [p for p, ctx in list(self._busy_accounts.items()) if "Циклическая" not in ctx]
-                for p in to_free:
-                    self._busy_accounts.pop(p, None)
+                busy = self.get_busy_accounts()
+                to_free = [p for p, ctx in busy.items() if "Циклическая" not in (ctx or "")]
+                if to_free:
+                    self.mark_account_free(to_free)
             except Exception:
                 pass
             self.btn_broadcast.configure(state="normal", text="Запустить задачи")
@@ -12708,6 +12783,7 @@ class TeletonApp(ctk.CTk):
 
         self.config = Config()
         self.log_queue = queue.Queue()
+        self._busy_accounts: dict[str, str] = {}
 
         # === ГЛАВНАЯ ЗАЩИТА ОТ ПАДЕНИЙ ПРИ КЛИКАХ ===
         # Tkinter/CustomTkinter по умолчанию роняет приложение на любой непойманной ошибке в callback'е кнопки/события.
@@ -13111,6 +13187,48 @@ class TeletonApp(ctk.CTk):
 
         # Перепланируем тик
         self.after(60000, self._check_pending_device_terminations)
+
+    def _refresh_accounts_busy_view(self):
+        try:
+            frame = getattr(self, "frames", {}).get("accounts")
+            if frame and hasattr(frame, "refresh"):
+                try:
+                    frame._last_refresh_ts = 0
+                except Exception:
+                    pass
+                frame.refresh()
+        except Exception:
+            pass
+
+    def mark_account_busy(self, phones: str | list[str], context: str):
+        if isinstance(phones, str):
+            phones = [phones]
+        changed = False
+        for phone in phones or []:
+            p = (phone or "").strip()
+            if not p:
+                continue
+            ctx = (context or "").strip() or "занят"
+            if self._busy_accounts.get(p) != ctx:
+                self._busy_accounts[p] = ctx
+                changed = True
+        if changed:
+            self._refresh_accounts_busy_view()
+
+    def mark_account_free(self, phones: str | list[str]):
+        if isinstance(phones, str):
+            phones = [phones]
+        changed = False
+        for phone in phones or []:
+            p = (phone or "").strip()
+            if p in self._busy_accounts:
+                self._busy_accounts.pop(p, None)
+                changed = True
+        if changed:
+            self._refresh_accounts_busy_view()
+
+    def get_busy_accounts(self) -> dict[str, str]:
+        return dict(self._busy_accounts)
 
     def _execute_pending_termination(self, task: dict, settings):
         """Выполнить одну запланированную задачу удаления сессий в фоне."""
