@@ -35,6 +35,16 @@ def _find_class_methods(src: str, class_name: str):
     return {}
 
 
+def _find_class_method_node(src: str, class_name: str, method_name: str):
+    tree = ast.parse(src)
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            for item in node.body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name == method_name:
+                    return item
+    return None
+
+
 def _find_top_level_function(src: str, name: str):
     tree = ast.parse(src)
     for node in tree.body:
@@ -214,3 +224,67 @@ def test_cycle_saved_messages_are_read_fresh_and_logged_before_send():
     assert "Источник=Избранное" in start
     assert "Перед отправкой | campaign=" in start
     assert "preview50" in start
+
+
+def test_cycle_done_run_id_requires_matching_current_runner():
+    src = _load_gui_source()
+    methods = _find_class_methods(src, "BroadcastFrame")
+    on_queue = methods.get("on_queue_message", "")
+    assert 'elif tag == "cycle_done":' in on_queue
+    cycle_done = on_queue.split('elif tag == "cycle_done":', 1)[1].split('elif tag == "check_done":', 1)[0]
+
+    assert "run_id" in cycle_done
+    assert "runner = self._cycle_get_runner(campaign_name)" in cycle_done
+    assert "self._cycle_finish_stopped_ui(campaign_name)" in cycle_done
+    assert (
+        "not isinstance(runner, dict)" in cycle_done
+        or "runner is None" in cycle_done
+        or "not runner" in cycle_done
+    ), "cycle_done with run_id must return when there is no matching current runner"
+    assert cycle_done.find("return") < cycle_done.find("self._cycle_finish_stopped_ui(campaign_name)")
+
+
+def test_cycle_refresh_table_does_not_rotate_targets_from_current_pos():
+    src = _load_gui_source()
+    refresh_node = _find_class_method_node(src, "BroadcastFrame", "_cycle_refresh_table")
+    assert refresh_node is not None
+
+    target_assignments = [
+        node
+        for node in ast.walk(refresh_node)
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if (
+            isinstance(target, ast.Attribute)
+            and target.attr == "_cycle_targets"
+            and isinstance(target.value, ast.Name)
+            and target.value.id == "self"
+        )
+    ]
+    assert target_assignments, "_cycle_refresh_table must assign self._cycle_targets"
+    for assignment in target_assignments:
+        assigned = ast.dump(assignment.value)
+        assert "Subscript(value=Name(id='targets'" not in assigned
+    refresh = ast.get_source_segment(src, refresh_node) or ""
+    assert "targets[current_pos:]" not in refresh
+    assert "targets[:current_pos]" not in refresh
+
+
+def test_cycle_send_path_passes_daily_actions_limit_to_sender():
+    src = _load_gui_source()
+    start_node = _find_class_method_node(src, "BroadcastFrame", "_start_cycle")
+    assert start_node is not None
+    send_calls = [
+        node
+        for node in ast.walk(start_node)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "send_broadcast_message"
+        )
+    ]
+    assert send_calls, "cycle send path must call sender.send_broadcast_message"
+    assert all(
+        any(keyword.arg == "daily_actions_limit" for keyword in call.keywords)
+        for call in send_calls
+    ), "cycle send path must pass daily_actions_limit into sender.send_broadcast_message"

@@ -26,6 +26,16 @@ def _find_class_methods(src: str, class_name: str) -> dict[str, str]:
     return {}
 
 
+def _find_class_method_node(src: str, class_name: str, method_name: str):
+    tree = ast.parse(src)
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            for item in node.body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name == method_name:
+                    return item
+    return None
+
+
 def _load_stop_helpers():
     src = _load_gui_source()
     tree = ast.parse(src)
@@ -268,6 +278,68 @@ def test_stop_watchdog_is_wired_to_current_stop():
     assert "_force_regular_stop_ui" in methods
     assert "_schedule_regular_stop_watchdog()" in methods.get("_stop_current_process", "")
     assert "_set_all_regular_stop_events()" in methods.get("_mass_stop_everything", "")
+
+
+def test_cycle_watchdog_is_not_triggered_before_stop_button_exists():
+    src = _load_gui_source()
+    init_node = _find_class_method_node(src, "BroadcastFrame", "__init__")
+    build_cycle_node = _find_class_method_node(src, "BroadcastFrame", "_build_cycle_tab")
+    assert init_node is not None
+    assert build_cycle_node is not None
+
+    def _is_self_attr(node, attr: str) -> bool:
+        return (
+            isinstance(node, ast.Attribute)
+            and node.attr == attr
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "self"
+        )
+
+    def _call_is_self_method(call: ast.Call, attr: str) -> bool:
+        return isinstance(call.func, ast.Attribute) and _is_self_attr(call.func, attr)
+
+    def _call_references_cycle_watchdog(call: ast.Call) -> bool:
+        return any(_is_self_attr(child, "_cycle_watchdog") for child in ast.walk(call))
+
+    build_cycle_triggers_watchdog = any(
+        _call_references_cycle_watchdog(node)
+        for node in ast.walk(build_cycle_node)
+        if isinstance(node, ast.Call)
+    )
+
+    def _stmt_assigns_stop_button(stmt: ast.stmt) -> bool:
+        return any(
+            _is_self_attr(target, "btn_stop_current")
+            for node in ast.walk(stmt)
+            if isinstance(node, ast.Assign)
+            for target in node.targets
+        )
+
+    def _stmt_can_trigger_watchdog(stmt: ast.stmt) -> bool:
+        for call in ast.walk(stmt):
+            if not isinstance(call, ast.Call):
+                continue
+            if _call_is_self_method(call, "_cycle_watchdog"):
+                return True
+            if build_cycle_triggers_watchdog and _call_is_self_method(call, "_build_cycle_tab"):
+                return True
+            if _call_is_self_method(call, "after") and _call_references_cycle_watchdog(call):
+                return True
+        return False
+
+    seen_stop_button = False
+    early_watchdog_lines = []
+    for stmt in init_node.body:
+        if not seen_stop_button and _stmt_can_trigger_watchdog(stmt):
+            early_watchdog_lines.append(stmt.lineno)
+        if _stmt_assigns_stop_button(stmt):
+            seen_stop_button = True
+
+    assert seen_stop_button, "BroadcastFrame must create self.btn_stop_current"
+    assert not early_watchdog_lines, (
+        "cycle watchdog must not be called or scheduled before self.btn_stop_current exists; "
+        f"early trigger lines: {early_watchdog_lines}"
+    )
 
 
 def test_stop_helpers_do_not_use_unbounded_gather_for_cancellation():
