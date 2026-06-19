@@ -6140,6 +6140,8 @@ class BroadcastFrame(ctk.CTkFrame):
         self._stop_watchdog_after_id = None
         self._cycle_runtime: dict[str, dict] = {}
         self._broadcast_status_after_id = None
+        self._broadcast_dashboard_refresh_reset_after_id = None
+        self._broadcast_dashboard_refresh_count = 0
         self._broadcast_ui_state = {
             "state": "idle",
             "current": "—",
@@ -6489,10 +6491,22 @@ class BroadcastFrame(ctk.CTkFrame):
             row=4, column=0, padx=10, pady=(3, 8), sticky="w"
         )
         self.lbl_broadcast_errors = ctk.CTkLabel(status_panel, text="—", anchor="w", text_color=("#991B1B", "#FCA5A5"))
-        self.lbl_broadcast_errors.grid(row=4, column=1, columnspan=2, padx=8, pady=(3, 8), sticky="ew")
-        ctk.CTkButton(status_panel, text="Обновить", width=95, command=self._refresh_broadcast_dashboard).grid(
-            row=4, column=3, padx=8, pady=(3, 8), sticky="e"
+        self.lbl_broadcast_errors.grid(row=4, column=1, columnspan=2, padx=8, pady=(3, 4), sticky="ew")
+        self.btn_broadcast_dashboard_refresh = ctk.CTkButton(
+            status_panel,
+            text="Обновить",
+            width=95,
+            command=self._refresh_broadcast_dashboard,
         )
+        self.btn_broadcast_dashboard_refresh.grid(row=4, column=3, padx=8, pady=(3, 4), sticky="e")
+        self.lbl_broadcast_refreshed = ctk.CTkLabel(
+            status_panel,
+            text="Обновлено: —",
+            text_color="gray55",
+            anchor="e",
+            font=ctk.CTkFont(size=11),
+        )
+        self.lbl_broadcast_refreshed.grid(row=5, column=1, columnspan=3, padx=8, pady=(0, 8), sticky="e")
 
     def _build_mention_tab(self):
         tab = self.tab_mention
@@ -10476,13 +10490,72 @@ class BroadcastFrame(ctk.CTkFrame):
         self._refresh_broadcast_status_panel()
         self._schedule_broadcast_status_refresh()
 
-    def _refresh_broadcast_dashboard(self):
-        self._refresh_broadcast_status_panel()
+    def _set_broadcast_refresh_feedback(self, state: str, detail: str = ""):
+        btn = getattr(self, "btn_broadcast_dashboard_refresh", None)
+        label = getattr(self, "lbl_broadcast_refreshed", None)
         try:
+            after_id = getattr(self, "_broadcast_dashboard_refresh_reset_after_id", None)
+            if after_id is not None:
+                self.after_cancel(after_id)
+                self._broadcast_dashboard_refresh_reset_after_id = None
+        except Exception:
+            self._broadcast_dashboard_refresh_reset_after_id = None
+
+        try:
+            if state == "running":
+                if btn is not None:
+                    btn.configure(state="disabled", text="Обновляю...")
+                if label is not None:
+                    label.configure(text="Обновление...", text_color="#F59E0B")
+                try:
+                    self.update_idletasks()
+                except Exception:
+                    pass
+                return
+
+            if state == "error":
+                if btn is not None:
+                    btn.configure(state="normal", text="Обновить")
+                if label is not None:
+                    label.configure(text=f"Ошибка обновления: {self._shorten_ui(detail, 70)}", text_color="#EF4444")
+                return
+
+            stamp = datetime.now().strftime("%H:%M:%S")
+            self._broadcast_dashboard_refresh_count = int(
+                getattr(self, "_broadcast_dashboard_refresh_count", 0) or 0
+            ) + 1
+            if label is not None:
+                suffix = f" | {detail}" if detail else ""
+                label.configure(
+                    text=f"Обновлено: {stamp} #{self._broadcast_dashboard_refresh_count}{suffix}",
+                    text_color=("#166534", "#86EFAC"),
+                )
+            if btn is not None:
+                btn.configure(state="normal", text="Обновлено")
+                self._broadcast_dashboard_refresh_reset_after_id = self.after(
+                    2500,
+                    lambda: self.btn_broadcast_dashboard_refresh.configure(text="Обновить"),
+                )
+            try:
+                self.update_idletasks()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _refresh_broadcast_dashboard(self):
+        self._set_broadcast_refresh_feedback("running")
+        try:
+            self._refresh_broadcast_status_panel()
+            refreshed_tasks = 0
             if hasattr(self, "_tasks_embed"):
                 self._tasks_embed.refresh()
+                refreshed_tasks = len(getattr(self._tasks_embed, "_tasks", []) or [])
+            self._set_broadcast_refresh_feedback("done", f"задач: {refreshed_tasks}")
+            self._append_log(f"[refresh] Дашборд задач рассылки обновлён: {refreshed_tasks}")
         except Exception as e:
-            self._append_log(f"[refresh] tasks table refresh failed: {e}")
+            self._set_broadcast_refresh_feedback("error", str(e))
+            self._append_log(f"[refresh] tasks dashboard refresh failed: {e}")
 
     def _refresh_broadcast_status_panel(self):
         if not hasattr(self, "lbl_broadcast_state"):
