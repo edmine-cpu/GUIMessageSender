@@ -3141,59 +3141,6 @@ class AccountsFrame(ctk.CTkFrame):
             health_rows = db.get_accounts_health()
             db.close()
 
-            # === Авто-тач для свежих аккаунтов (после импорта скриптом) ===
-            # Если аккаунт есть в БД, имеет сессию, но никогда не проверялся (last_check_ok_at пустой),
-            # то при нажатии "Обновить" мы "мягко" помечаем его как проверенный сейчас.
-            # Это решает проблему "ничего не изменилось" для новых "прогрев" аккаунтов.
-            # Они сразу покажут время в колонке Check, хотя реального connect'а через sender ещё не было.
-            import os
-            from datetime import datetime as _dt
-            touched = []
-            sess_dir = getattr(getattr(self, 'app', None), 'config', None)
-            sess_dir = getattr(sess_dir, 'sessions_dir', 'data/sessions') if sess_dir else 'data/sessions'
-            uid_map = {
-                '+595981846251': '8669613712',
-                '+998953095083': '8369026562',
-                '+13027268003': '8663535960',
-            }
-            for h in health_rows:
-                if not h.get("last_check_ok_at"):
-                    phone = h.get("phone", "")
-                    sess_found = False
-                    try:
-                        for fname in os.listdir(sess_dir):
-                            if fname.startswith("session_") and (phone in fname or phone.replace("+", "") in fname):
-                                sess_found = True
-                                break
-                    except Exception:
-                        pass
-                    if not sess_found:
-                        uid = uid_map.get(phone)
-                        if uid:
-                            uid_path = os.path.join(sess_dir, f"session_{uid}.session")
-                            if os.path.exists(uid_path):
-                                sess_found = True
-                    if sess_found:
-                        now_iso = _dt.now().isoformat()
-                        try:
-                            db2 = Database(self.app.config.db_path)
-                            db2.conn.execute(
-                                "UPDATE accounts SET last_check_ok_at=?, last_send_at=? WHERE phone=?",
-                                (now_iso, now_iso, phone)
-                            )
-                            db2.conn.commit()
-                            db2.close()
-                            h["last_check_ok_at"] = now_iso
-                            h["last_send_at"] = now_iso
-                            touched.append(phone)
-                        except Exception:
-                            pass
-            if touched:
-                try:
-                    self.log.append(f"[i] Автоматически помечены как проверенные (после импорта): {', '.join(touched)}")
-                except Exception:
-                    pass
-
             for h in health_rows:
                 def _fmt_time(s: str) -> str:
                     s = (s or "").strip()
@@ -3234,7 +3181,7 @@ class AccountsFrame(ctk.CTkFrame):
                         pass
 
                     health_raw = (h.get("health") or "—").lower()
-                    if "active" in health_raw or health_raw == "active":
+                    if health_raw == "active":
                         health_vis = "🟢 active"
                     elif "banned" in health_raw or "inactive" in health_raw:
                         health_vis = "🔴 " + (h.get("health") or "banned")
@@ -6139,6 +6086,7 @@ class BroadcastFrame(ctk.CTkFrame):
         self._regular_stop_events: dict[str, threading.Event] = {}
         self._stop_watchdog_after_id = None
         self._cycle_runtime: dict[str, dict] = {}
+        self._cycle_stale_enabled_names: set[str] = set()
         self._broadcast_status_after_id = None
         self._broadcast_dashboard_refresh_reset_after_id = None
         self._broadcast_dashboard_refresh_count = 0
@@ -7598,6 +7546,16 @@ class BroadcastFrame(ctk.CTkFrame):
         runtime_account = (runtime.get("account") or "").strip()
         runtime_success = (runtime.get("last_success_at") or "").strip()
         runtime_error = (runtime.get("last_error") or "").strip()
+        runtime_phase = (runtime.get("phase") or "").strip()
+        runtime_wait_reason = (runtime.get("wait_reason") or "").strip()
+        runtime_wait_seconds = runtime.get("wait_seconds") or 0
+        runtime_updated_at = (runtime.get("updated_at") or "").strip()
+        runtime_age_seconds = 0
+        if runtime_updated_at:
+            try:
+                runtime_age_seconds = max(0, int((datetime.now() - datetime.fromisoformat(runtime_updated_at)).total_seconds()))
+            except Exception:
+                runtime_age_seconds = 0
 
         return {
             "campaign_id": campaign_id,
@@ -7620,6 +7578,10 @@ class BroadcastFrame(ctk.CTkFrame):
             "enabled": bool(int(campaign.get("enabled", 0) or 0)),
             "sent_total": int(state.get("sent_total", 0) or 0),
             "error_total": int(state.get("error_total", 0) or 0),
+            "phase": runtime_phase or "idle",
+            "wait_reason": runtime_wait_reason,
+            "wait_seconds": runtime_wait_seconds,
+            "runtime_age_seconds": runtime_age_seconds,
             "last_error": runtime_error or (state.get("last_error") or "").strip() or "—",
         }
 
@@ -7667,6 +7629,8 @@ class BroadcastFrame(ctk.CTkFrame):
             "last_error",
             "last_error_at",
             "phase",
+            "wait_reason",
+            "wait_seconds",
         ):
             if key in msg:
                 current[key] = msg.get(key) or ""
@@ -7700,7 +7664,7 @@ class BroadcastFrame(ctk.CTkFrame):
             runners = getattr(self, "_cycle_runners", None) or {}
             for name, runner in list(runners.items()):
                 if not self._cycle_runner_alive(runner):
-                    runners.pop(name, None)
+                    self._cycle_finish_stopped_ui(name)
 
             active_names = self._cycle_active_names()
             self._cycle_running = bool(active_names)
@@ -7733,6 +7697,8 @@ class BroadcastFrame(ctk.CTkFrame):
 
             selected = (self._cycle_campaign_name or "").strip()
             selected_alive = self._cycle_selected_running(selected)
+            stale_names = set(enabled_with_targets) - set(active_names)
+            self._cycle_stale_enabled_names = stale_names
             if enabled_with_targets and not active_names:
                 now = time.monotonic()
                 if now - getattr(self, "_cycle_last_watchdog_log_at", 0.0) > 300:
@@ -7911,7 +7877,7 @@ class BroadcastFrame(ctk.CTkFrame):
                             self.c_campaign_var.set(name)
                         except Exception:
                             pass
-                    self._start_cycle()
+                    self._start_cycle(save_current_settings=False)
 
                     # P0: do not mark campaign as running until a live worker exists.
                     runner = self._cycle_get_runner(name)
@@ -8162,8 +8128,16 @@ class BroadcastFrame(ctk.CTkFrame):
             position = f"{(pos + 1) if total else '—'}/{total or '—'}"
             selected_running = self._cycle_runner_alive(self._cycle_get_runner(self._cycle_campaign_name))
             active_count = self._cycle_active_count()
-            summary_color = "#2FA572" if selected_running else ("#F39C12" if active_count or snap["enabled"] else "gray70")
+            stale_names = getattr(self, "_cycle_stale_enabled_names", set()) or set()
+            selected_stale = (
+                bool(snap["enabled"])
+                and not selected_running
+                and (self._cycle_campaign_name or "").strip() in stale_names
+            )
+            summary_color = "#E74C3C" if selected_stale else ("#2FA572" if selected_running else ("#F39C12" if active_count or snap["enabled"] else "gray70"))
             status_value = "запущена" if selected_running else ("сохранена" if snap["enabled"] else "остановлен")
+            if selected_stale:
+                status_value = "no runner"
             metrics = {
                 "status": status_value,
                 "campaigns": active_count,
@@ -8187,6 +8161,12 @@ class BroadcastFrame(ctk.CTkFrame):
             ]
             if snap["current_error"] != "—":
                 detail_parts.append(f"Ошибка цели: {self._cycle_short_text(snap['current_error'], 42)}")
+            phase = str(snap.get("phase") or "idle")
+            detail_parts.append(f"phase: {phase}")
+            if snap.get("wait_reason"):
+                detail_parts.append(f"wait: {self._cycle_short_text(str(snap.get('wait_reason') or ''), 42)}")
+            if int(snap.get("runtime_age_seconds", 0) or 0) > 0:
+                detail_parts.append(f"progress age: {int(snap.get('runtime_age_seconds', 0) or 0)}s")
             self._cycle_update_dashboard(metrics, " | ".join(detail_parts), summary_color)
             self._cycle_refresh_cycle_buttons()
             if selected_running:
@@ -8200,6 +8180,11 @@ class BroadcastFrame(ctk.CTkFrame):
                 self._cycle_set_status(
                     status_text,
                     "#2FA572",
+                )
+            elif selected_stale:
+                self._cycle_set_status(
+                    f"no runner | enabled=1 | targets={total} | position={position}",
+                    "#E74C3C",
                 )
             elif snap["enabled"]:
                 self._cycle_set_status(
@@ -8322,11 +8307,12 @@ class BroadcastFrame(ctk.CTkFrame):
         self.log.append(f"[~] Правила обновлены: {link}")
         self._cycle_refresh_table()
 
-    def _start_cycle(self):
+    def _start_cycle(self, save_current_settings: bool = True):
         running_campaign_name = (self._cycle_campaign_name or "").strip() or "CycleBroadcast"
         self._append_log(f"[Циклическая] [~] Попытка запуска кампании: '{running_campaign_name}'")
         try:
-            self._cycle_save_current_campaign_settings(running_campaign_name)
+            if save_current_settings:
+                self._cycle_save_current_campaign_settings(running_campaign_name)
         except Exception as e:
             self._cycle_reject_start(
                 f"Не удалось сохранить настройки кампании перед стартом: {e}",
@@ -8505,6 +8491,11 @@ class BroadcastFrame(ctk.CTkFrame):
                     targets = db.get_cycle_targets(campaign_id)
                     state = db.load_cycle_state(campaign_id)
                     phones = db.get_cycle_campaign_account_phones(campaign_id)
+                    pause_scope = phones or ([selected_account_fallback] if str(selected_account_fallback).strip().startswith("+") else [])
+                    try:
+                        db.clear_daily_limit_auto_pauses(pause_scope or None, daily_actions_limit)
+                    except Exception:
+                        pass
                     accounts_all = db.get_active_accounts()
                 finally:
                     db.close()
@@ -8711,6 +8702,8 @@ class BroadcastFrame(ctk.CTkFrame):
                     last_success_at: str = "",
                     last_error: str = "",
                     phase: str = "",
+                    wait_reason: str = "",
+                    wait_seconds: int | float = 0,
                 ):
                     try:
                         log_queue.put((
@@ -8723,6 +8716,8 @@ class BroadcastFrame(ctk.CTkFrame):
                                 "last_success_at": last_success_at or "",
                                 "last_error": last_error or "",
                                 "phase": phase or "",
+                                "wait_reason": wait_reason or "",
+                                "wait_seconds": wait_seconds or 0,
                             },
                         ))
                     except Exception:
@@ -8759,6 +8754,11 @@ class BroadcastFrame(ctk.CTkFrame):
                     while not stop_event.is_set():
                         targets = db.get_cycle_targets(campaign_id)
                         phones = db.get_cycle_campaign_account_phones(campaign_id)
+                        pause_scope = phones or ([selected_account_fallback] if str(selected_account_fallback).strip().startswith("+") else [])
+                        try:
+                            db.clear_daily_limit_auto_pauses(pause_scope or None, daily_actions_limit)
+                        except Exception:
+                            pass
                         accounts_all = db.get_active_accounts()
                         if phones:
                             by_phone = {a.phone: a for a in accounts_all}
@@ -8778,6 +8778,11 @@ class BroadcastFrame(ctk.CTkFrame):
                             if dry_run:
                                 log_queue.put(("cycle_log", "[DRY] Нет целей для превью"))
                                 break
+                            _emit_cycle_progress(
+                                phase="waiting:no_targets",
+                                wait_reason="no targets",
+                                wait_seconds=5,
+                            )
                             await _sleep_interruptibly(5, stop_event, op_name="циклическая рассылка")
                             continue
                         if not accounts:
@@ -8824,6 +8829,11 @@ class BroadcastFrame(ctk.CTkFrame):
                                 except Exception as e:
                                     log_queue.put(("cycle_log", f"[~] Нет активных аккаунтов; не удалось посчитать ожидание: {type(e).__name__}"))
                                 last_no_accounts_log_at = now_mono
+                            _emit_cycle_progress(
+                                phase="waiting:no_active_accounts",
+                                wait_reason="no active accounts",
+                                wait_seconds=wait_sleep,
+                            )
                             await _sleep_interruptibly(wait_sleep, stop_event, op_name="cycle", progress="no active accounts")
                             continue
 
@@ -9096,6 +9106,7 @@ class BroadcastFrame(ctk.CTkFrame):
                                             link,
                                             final_text,
                                             daily_actions_limit=daily_actions_limit,
+                                            sleep_on_flood_wait=False,
                                         ),
                                         f"{link}: отправка",
                                         60,
@@ -9326,6 +9337,14 @@ class BroadcastFrame(ctk.CTkFrame):
                             if dry_run:
                                 log_queue.put(("cycle_log", f"[DRY] Пауза {delay:.0f}с пропущена"))
                             else:
+                                _emit_cycle_progress(
+                                    account=acc.phone,
+                                    current_target=link,
+                                    next_target=targets[current_pos]["link"] if targets else "",
+                                    phase="waiting:send_delay",
+                                    wait_reason="send delay",
+                                    wait_seconds=delay,
+                                )
                                 await _sleep_interruptibly(
                                     delay,
                                     stop_event,
@@ -9339,6 +9358,11 @@ class BroadcastFrame(ctk.CTkFrame):
                             break
 
                         if account_blocked:
+                            _emit_cycle_progress(
+                                phase="waiting:account_limiter",
+                                wait_reason="account limiter",
+                                wait_seconds=10,
+                            )
                             await _sleep_interruptibly(
                                 10,
                                 stop_event,
@@ -9353,6 +9377,11 @@ class BroadcastFrame(ctk.CTkFrame):
 
                         if round_pause_seconds > 0:
                             log_queue.put(("cycle_log", f"[~] Круг завершён — пауза {round_pause_seconds}с"))
+                            _emit_cycle_progress(
+                                phase="waiting:round_pause",
+                                wait_reason="between rounds",
+                                wait_seconds=round_pause_seconds,
+                            )
                             await _sleep_interruptibly(
                                 round_pause_seconds,
                                 stop_event,
@@ -9360,6 +9389,11 @@ class BroadcastFrame(ctk.CTkFrame):
                                 progress="между кругами",
                             )
                         elif not made_send:
+                            _emit_cycle_progress(
+                                phase="waiting:no_ready_targets",
+                                wait_reason="no sendable targets",
+                                wait_seconds=20,
+                            )
                             await _sleep_interruptibly(
                                 20,
                                 stop_event,
@@ -9410,6 +9444,10 @@ class BroadcastFrame(ctk.CTkFrame):
                 "run_id": run_id,
             }
             self._cycle_runners[running_campaign_name] = runner
+            try:
+                self._cycle_stale_enabled_names.discard(running_campaign_name)
+            except Exception:
+                pass
             self._cycle_thread = cycle_thread
             self._cycle_stop_event = stop_event
 
@@ -9590,6 +9628,10 @@ class BroadcastFrame(ctk.CTkFrame):
         runners = getattr(self, "_cycle_runners", None) or {}
         if campaign_name:
             self._cycle_clear_runtime(campaign_name)
+            try:
+                self._cycle_stale_enabled_names.discard(campaign_name)
+            except Exception:
+                pass
             # Освободить аккаунты этой кампании
             try:
                 dbm = Database(self.app.config.db_path)
@@ -12850,6 +12892,7 @@ class StatsFrame(ctk.CTkFrame):
             ("tasks", "Задачи"),
             ("errors", "Ошибки"),
             ("runtime", "Работает сейчас"),
+            ("cycles", "Циклы"),
             ("recent", "Последние причины"),
         ]):
             ctk.CTkLabel(diag_frame, text=f"{label}:", font=ctk.CTkFont(weight="bold"),
@@ -12893,7 +12936,19 @@ class StatsFrame(ctk.CTkFrame):
         accounts = (snapshot or {}).get("accounts", {})
         tasks = (snapshot or {}).get("tasks", {})
         errors = (snapshot or {}).get("errors", {})
+        cycles = (snapshot or {}).get("cycles", {})
+        cycle_summary = cycles.get("summary", {}) if isinstance(cycles, dict) else {}
         runtime = self._get_runtime_diagnostics()
+        running_cycle_count = 0
+        stale_cycle_count = 0
+        try:
+            bf = getattr(self.app, "frames", {}).get("broadcast")
+            if bf:
+                if hasattr(bf, "_cycle_active_names"):
+                    running_cycle_count = len(bf._cycle_active_names())
+                stale_cycle_count = len(getattr(bf, "_cycle_stale_enabled_names", set()) or [])
+        except Exception:
+            pass
 
         self.diag_labels["accounts"].configure(text=(
             f"активно: {accounts.get('enabled', 0)} | доступно сейчас: {accounts.get('available', 0)} | "
@@ -12914,6 +12969,19 @@ class StatsFrame(ctk.CTkFrame):
             text=f"за период: {errors.get('total', 0)}" + (f" | {status_text}" if status_text else "")
         )
         self.diag_labels["runtime"].configure(text=runtime)
+        if "cycles" in self.diag_labels:
+            enabled_with_targets = int(cycle_summary.get("enabled_with_targets", 0) or 0)
+            enabled_without_runner = max(stale_cycle_count, max(0, enabled_with_targets - running_cycle_count))
+            blocked_accounts = sum(
+                int(accounts.get(key, 0) or 0)
+                for key in ("flood_wait", "needs_reauth", "network_issue")
+            )
+            self.diag_labels["cycles"].configure(text=(
+                f"running: {running_cycle_count} | enabled_without_runner: {enabled_without_runner} | "
+                f"waiting targets: {cycle_summary.get('waiting_targets', 0)} | blocked accounts: {blocked_accounts} | "
+                f"targets active/waiting/error: {cycle_summary.get('active_targets', 0)}/"
+                f"{cycle_summary.get('waiting_targets', 0)}/{cycle_summary.get('error_targets', 0)}"
+            ))
 
         recent = errors.get("recent", []) or []
         if recent:
@@ -12938,6 +13006,30 @@ class StatsFrame(ctk.CTkFrame):
                     cycle_names = bf._cycle_active_names()
                 if cycle_names:
                     parts.append("циклы: " + ", ".join(cycle_names[:4]))
+                runtime = getattr(bf, "_cycle_runtime", {}) or {}
+                runtime_bits = []
+                for name in cycle_names[:3]:
+                    item = runtime.get(name) or {}
+                    phase = (item.get("phase") or "idle").strip()
+                    wait_reason = (item.get("wait_reason") or "").strip()
+                    updated_at = (item.get("updated_at") or "").strip()
+                    age = 0
+                    if updated_at:
+                        try:
+                            age = max(0, int((datetime.now() - datetime.fromisoformat(updated_at)).total_seconds()))
+                        except Exception:
+                            age = 0
+                    bit = f"{name}: {phase}"
+                    if wait_reason:
+                        bit += f" wait={wait_reason}"
+                    if age:
+                        bit += f" age={age}s"
+                    runtime_bits.append(bit)
+                if runtime_bits:
+                    parts.append("cycle runtime: " + "; ".join(runtime_bits))
+                stale_names = sorted(getattr(bf, "_cycle_stale_enabled_names", set()) or [])
+                if stale_names:
+                    parts.append("cycle stale: " + ", ".join(stale_names[:4]))
         except Exception:
             pass
 

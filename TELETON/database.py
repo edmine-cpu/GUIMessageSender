@@ -532,6 +532,46 @@ class Database:
             accounts.append(acc)
         return accounts
 
+    def clear_daily_limit_auto_pauses(
+        self,
+        account_phones: List[str] | None = None,
+        daily_actions_limit: int = 0,
+    ) -> int:
+        """Clear only auto pauses created by the per-campaign daily action limiter.
+
+        Manual pauses stay intact. A campaign limit of 0 means unlimited, so any
+        previous daily-limit pause should stop excluding the account.
+        """
+        today = date.today().isoformat()
+        self.conn.execute(
+            "UPDATE accounts SET sent_today=0, actions_today=0, error_today=0, last_reset_date=? "
+            "WHERE last_reset_date<>?",
+            (today, today),
+        )
+
+        limit = max(0, int(daily_actions_limit or 0))
+        where = ["pause_reason LIKE 'daily_actions_limit:%'", "paused_until <> ''"]
+        params: list = []
+        if limit > 0:
+            where.append("actions_today < ?")
+            params.append(limit)
+
+        phones = [
+            (p or "").strip()
+            for p in (account_phones or [])
+            if (p or "").strip()
+        ]
+        if phones:
+            where.append(f"phone IN ({','.join('?' for _ in phones)})")
+            params.extend(phones)
+
+        cur = self.conn.execute(
+            f"UPDATE accounts SET paused_until='', pause_reason='' WHERE {' AND '.join(where)}",
+            params,
+        )
+        self.conn.commit()
+        return int(cur.rowcount or 0)
+
     def increment_sent_count(self, phone: str):
         """Увеличить счётчик отправленных сообщений."""
         self.conn.execute(
@@ -708,6 +748,17 @@ class Database:
                 self.conn.execute("ROLLBACK")
                 return False, acc.status, 0.0
 
+            daily_actions_limit = int(daily_actions_limit or 0)
+
+            if acc.paused_until and (acc.pause_reason or "").startswith("daily_actions_limit:"):
+                if daily_actions_limit <= 0 or int(acc.actions_today or 0) < daily_actions_limit:
+                    self.conn.execute(
+                        "UPDATE accounts SET paused_until='', pause_reason='' WHERE phone=?",
+                        (phone,),
+                    )
+                    acc.paused_until = ""
+                    acc.pause_reason = ""
+
             if acc.paused_until:
                 try:
                     if datetime.fromisoformat(acc.paused_until) > now:
@@ -724,7 +775,6 @@ class Database:
                 except Exception:
                     pass
 
-            daily_actions_limit = int(daily_actions_limit or 0)
             if daily_actions_limit > 0 and int(acc.actions_today or 0) >= daily_actions_limit:
                 until = datetime.combine(date.today() + timedelta(days=1), datetime.min.time()).isoformat(timespec="seconds")
                 self.conn.execute(
@@ -1726,6 +1776,7 @@ class Database:
         campaign_id: int,
         links: List[str],
         defaults: dict,
+        reset_runtime_state: bool = True,
     ) -> tuple[int, int]:
         now = datetime.now().isoformat(timespec="seconds")
         clean_links = []
@@ -1757,11 +1808,35 @@ class Database:
         updated = 0
         for pos, link in enumerate(clean_links):
             if link in existing_by_link:
-                self.conn.execute("""
-                    UPDATE cycle_targets
-                    SET pos = ?, updated_at = ?
-                    WHERE id = ?
-                """, (pos, now, existing_by_link[link]))
+                if reset_runtime_state:
+                    self.conn.execute("""
+                        UPDATE cycle_targets
+                        SET pos = ?,
+                            hours_start = ?, hours_end = ?,
+                            min_interval_minutes = ?,
+                            interval_min_seconds = ?, interval_max_seconds = ?,
+                            min_new_messages = ?, fallback_hours = ?,
+                            status = 'active', retry_after = '', last_error = '',
+                            updated_at = ?
+                        WHERE id = ?
+                    """, (
+                        pos,
+                        int(defaults.get("hours_start", 0)),
+                        int(defaults.get("hours_end", 23)),
+                        int(defaults.get("min_interval_minutes", 0)),
+                        interval_min_seconds,
+                        interval_max_seconds,
+                        int(defaults.get("min_new_messages", 0)),
+                        int(defaults.get("fallback_hours", 0)),
+                        now,
+                        existing_by_link[link],
+                    ))
+                else:
+                    self.conn.execute("""
+                        UPDATE cycle_targets
+                        SET pos = ?, updated_at = ?
+                        WHERE id = ?
+                    """, (pos, now, existing_by_link[link]))
                 updated += 1
             else:
                 self.conn.execute("""
@@ -1899,6 +1974,11 @@ class Database:
             VALUES (?, ?)
         """, (campaign_id, now))
         self.conn.commit()
+        row = self.conn.execute("""
+            SELECT * FROM cycle_state WHERE campaign_id = ?
+        """, (campaign_id,)).fetchone()
+        if row:
+            return dict(row)
         return {
             "campaign_id": campaign_id,
             "current_pos": 0,
@@ -1907,6 +1987,10 @@ class Database:
             "last_account_phone": "",
             "last_text_preview": "",
             "updated_at": now,
+            "sent_total": 0,
+            "error_total": 0,
+            "last_error": "",
+            "last_account_send_count": 0,
         }
 
     def update_cycle_state(
@@ -2183,10 +2267,70 @@ class Database:
                 })
 
         recent_errors.sort(key=lambda item: item.get("time", ""), reverse=True)
+        now_iso = datetime.now().isoformat(timespec="seconds")
+        cycle_rows = self.conn.execute("""
+            SELECT
+                c.id,
+                c.name,
+                c.enabled,
+                COUNT(t.id) AS targets_total,
+                SUM(CASE WHEN t.status = 'error' THEN 1 ELSE 0 END) AS targets_error,
+                SUM(CASE
+                    WHEN COALESCE(t.retry_after, '') <> '' AND t.retry_after > ? THEN 1
+                    ELSE 0
+                END) AS targets_waiting,
+                MAX(s.last_run_at) AS last_run_at,
+                MAX(s.last_error) AS last_error
+            FROM cycle_campaigns c
+            LEFT JOIN cycle_targets t ON t.campaign_id = c.id
+            LEFT JOIN cycle_state s ON s.campaign_id = c.id
+            GROUP BY c.id
+            ORDER BY c.name
+        """, (now_iso,)).fetchall()
+        cycle_items = []
+        cycle_counts = {
+            "campaigns": 0,
+            "enabled": 0,
+            "enabled_with_targets": 0,
+            "targets": 0,
+            "active_targets": 0,
+            "waiting_targets": 0,
+            "error_targets": 0,
+        }
+        for row in cycle_rows:
+            targets_total = int(row["targets_total"] or 0)
+            targets_error = int(row["targets_error"] or 0)
+            targets_waiting = int(row["targets_waiting"] or 0)
+            active_targets = max(0, targets_total - targets_error - targets_waiting)
+            enabled = bool(int(row["enabled"] or 0))
+            cycle_counts["campaigns"] += 1
+            cycle_counts["targets"] += targets_total
+            cycle_counts["active_targets"] += active_targets
+            cycle_counts["waiting_targets"] += targets_waiting
+            cycle_counts["error_targets"] += targets_error
+            if enabled:
+                cycle_counts["enabled"] += 1
+                if targets_total:
+                    cycle_counts["enabled_with_targets"] += 1
+            cycle_items.append({
+                "id": int(row["id"] or 0),
+                "name": row["name"] or "",
+                "enabled": enabled,
+                "targets_total": targets_total,
+                "active_targets": active_targets,
+                "waiting_targets": targets_waiting,
+                "error_targets": targets_error,
+                "last_run_at": row["last_run_at"] or "",
+                "last_error": row["last_error"] or "",
+            })
         return {
             "days": days,
             "accounts": account_counts,
             "tasks": task_counts,
+            "cycles": {
+                "summary": cycle_counts,
+                "items": cycle_items,
+            },
             "errors": {
                 "total": sum(error_counts.values()),
                 "by_status": error_counts,

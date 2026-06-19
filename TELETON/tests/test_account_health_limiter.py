@@ -91,6 +91,115 @@ def test_try_acquire_action_slot_daily_limit_pauses_until_next_midnight_and_heal
         db.close()
 
 
+def test_daily_limit_auto_pause_clears_when_limit_disabled(tmp_db_path):
+    phone = "+301"
+    db = Database(tmp_db_path)
+    try:
+        db.add_account(Account(
+            phone=phone,
+            actions_today=9,
+            last_reset_date=date.today().isoformat(),
+            paused_until="2999-01-01T00:00:00",
+            pause_reason="daily_actions_limit:5",
+        ))
+
+        changed = db.clear_daily_limit_auto_pauses([phone], daily_actions_limit=0)
+        assert changed == 1
+
+        acc = next(x for x in db.get_all_accounts() if x.phone == phone)
+        assert acc.paused_until == ""
+        assert acc.pause_reason == ""
+
+        ok, reason, wait_s = db.try_acquire_action_slot(
+            phone,
+            "dm",
+            min_interval_seconds=0,
+            daily_actions_limit=0,
+        )
+        assert (ok, reason, wait_s) == (True, "ok", 0.0)
+    finally:
+        db.close()
+
+
+def test_daily_limit_auto_pause_clears_when_limit_raised_above_actions_today(tmp_db_path):
+    phone = "+302"
+    db = Database(tmp_db_path)
+    try:
+        db.add_account(Account(
+            phone=phone,
+            actions_today=6,
+            last_reset_date=date.today().isoformat(),
+            paused_until="2999-01-01T00:00:00",
+            pause_reason="daily_actions_limit:5",
+        ))
+
+        changed = db.clear_daily_limit_auto_pauses([phone], daily_actions_limit=10)
+        assert changed == 1
+
+        acc = next(x for x in db.get_all_accounts() if x.phone == phone)
+        assert acc.paused_until == ""
+        assert acc.pause_reason == ""
+
+        ok, reason, wait_s = db.try_acquire_action_slot(
+            phone,
+            "dm",
+            min_interval_seconds=0,
+            daily_actions_limit=10,
+        )
+        assert (ok, reason, wait_s) == (True, "ok", 0.0)
+    finally:
+        db.close()
+
+
+def test_try_acquire_action_slot_clears_stale_daily_limit_pause(tmp_db_path):
+    phone = "+303"
+    db = Database(tmp_db_path)
+    try:
+        db.add_account(Account(
+            phone=phone,
+            actions_today=4,
+            last_reset_date=date.today().isoformat(),
+            paused_until="2999-01-01T00:00:00",
+            pause_reason="daily_actions_limit:3",
+        ))
+
+        ok, reason, wait_s = db.try_acquire_action_slot(
+            phone,
+            "dm",
+            min_interval_seconds=0,
+            daily_actions_limit=8,
+        )
+        assert (ok, reason, wait_s) == (True, "ok", 0.0)
+
+        acc = next(x for x in db.get_all_accounts() if x.phone == phone)
+        assert acc.paused_until == ""
+        assert acc.pause_reason == ""
+    finally:
+        db.close()
+
+
+def test_clear_daily_limit_auto_pauses_keeps_manual_pause(tmp_db_path):
+    phone = "+304"
+    db = Database(tmp_db_path)
+    try:
+        db.add_account(Account(
+            phone=phone,
+            actions_today=1,
+            last_reset_date=date.today().isoformat(),
+            paused_until="2999-01-01T00:00:00",
+            pause_reason="manual",
+        ))
+
+        changed = db.clear_daily_limit_auto_pauses([phone], daily_actions_limit=0)
+        assert changed == 0
+
+        acc = next(x for x in db.get_all_accounts() if x.phone == phone)
+        assert acc.paused_until == "2999-01-01T00:00:00"
+        assert acc.pause_reason == "manual"
+    finally:
+        db.close()
+
+
 def test_log_account_action_updates_counters(tmp_db_path):
     db = Database(tmp_db_path)
     try:
@@ -109,4 +218,3 @@ def test_log_account_action_updates_counters(tmp_db_path):
         assert "oops" in h2["last_error_text"] or h2["last_error_text"]
     finally:
         db.close()
-

@@ -138,6 +138,141 @@ def test_cycle_campaign_v18_columns_exist_and_default(tmp_db_path):
         db.close()
 
 
+def test_replace_cycle_targets_resets_runtime_state_and_preserves_send_history(tmp_db_path):
+    db = Database(tmp_db_path)
+    try:
+        campaign_id = db.get_or_create_cycle_campaign("ResetRuntime")
+        db.replace_cycle_targets(
+            campaign_id,
+            ["https://t.me/board"],
+            {
+                "hours_start": 1,
+                "hours_end": 2,
+                "interval_min_seconds": 60,
+                "interval_max_seconds": 120,
+                "min_new_messages": 1,
+                "fallback_hours": 2,
+            },
+        )
+        target = db.get_cycle_targets(campaign_id)[0]
+        db.conn.execute("""
+            UPDATE cycle_targets
+            SET status='waiting',
+                retry_after='2999-01-01T00:00:00',
+                last_error='old error',
+                last_sent_at='2026-06-18T10:00:00',
+                last_seen_msg_id=777,
+                last_account_phone='+15550001111',
+                last_text_preview='old preview'
+            WHERE id=?
+        """, (target["id"],))
+        db.conn.commit()
+
+        added, updated = db.replace_cycle_targets(
+            campaign_id,
+            ["https://t.me/board"],
+            {
+                "hours_start": 8,
+                "hours_end": 22,
+                "min_interval_minutes": 3,
+                "interval_min_seconds": 180,
+                "interval_max_seconds": 240,
+                "min_new_messages": 5,
+                "fallback_hours": 9,
+            },
+            reset_runtime_state=True,
+        )
+
+        assert (added, updated) == (0, 1)
+        refreshed = db.get_cycle_targets(campaign_id)[0]
+        assert refreshed["status"] == "active"
+        assert refreshed["retry_after"] == ""
+        assert refreshed["last_error"] == ""
+        assert refreshed["hours_start"] == 8
+        assert refreshed["hours_end"] == 22
+        assert refreshed["min_interval_minutes"] == 3
+        assert refreshed["interval_min_seconds"] == 180
+        assert refreshed["interval_max_seconds"] == 240
+        assert refreshed["min_new_messages"] == 5
+        assert refreshed["fallback_hours"] == 9
+        assert refreshed["last_sent_at"] == "2026-06-18T10:00:00"
+        assert refreshed["last_seen_msg_id"] == 777
+        assert refreshed["last_account_phone"] == "+15550001111"
+        assert refreshed["last_text_preview"] == "old preview"
+    finally:
+        db.close()
+
+
+def test_replace_cycle_targets_can_keep_runtime_state_when_requested(tmp_db_path):
+    db = Database(tmp_db_path)
+    try:
+        campaign_id = db.get_or_create_cycle_campaign("KeepRuntime")
+        db.replace_cycle_targets(
+            campaign_id,
+            ["https://t.me/board"],
+            {
+                "hours_start": 1,
+                "hours_end": 2,
+                "interval_min_seconds": 60,
+                "interval_max_seconds": 120,
+                "min_new_messages": 1,
+                "fallback_hours": 2,
+            },
+        )
+        target = db.get_cycle_targets(campaign_id)[0]
+        db.conn.execute("""
+            UPDATE cycle_targets
+            SET status='waiting',
+                retry_after='2999-01-01T00:00:00',
+                last_error='old error',
+                hours_start=1,
+                hours_end=2,
+                interval_min_seconds=60,
+                interval_max_seconds=120
+            WHERE id=?
+        """, (target["id"],))
+        db.conn.commit()
+
+        added, updated = db.replace_cycle_targets(
+            campaign_id,
+            ["https://t.me/board"],
+            {
+                "hours_start": 8,
+                "hours_end": 22,
+                "interval_min_seconds": 180,
+                "interval_max_seconds": 240,
+                "min_new_messages": 5,
+                "fallback_hours": 9,
+            },
+            reset_runtime_state=False,
+        )
+
+        assert (added, updated) == (0, 1)
+        refreshed = db.get_cycle_targets(campaign_id)[0]
+        assert refreshed["status"] == "waiting"
+        assert refreshed["retry_after"] == "2999-01-01T00:00:00"
+        assert refreshed["last_error"] == "old error"
+        assert refreshed["hours_start"] == 1
+        assert refreshed["hours_end"] == 2
+        assert refreshed["interval_min_seconds"] == 60
+        assert refreshed["interval_max_seconds"] == 120
+    finally:
+        db.close()
+
+
+def test_new_cycle_state_row_returns_runtime_stats_defaults(tmp_db_path):
+    db = Database(tmp_db_path)
+    try:
+        campaign_id = db.get_or_create_cycle_campaign("FreshState")
+        state = db.load_cycle_state(campaign_id)
+        assert state["sent_total"] == 0
+        assert state["error_total"] == 0
+        assert state["last_error"] == ""
+        assert state["last_account_send_count"] == 0
+    finally:
+        db.close()
+
+
 def test_cycle_campaign_templates_legacy_message_text_survives(tmp_db_path):
     db = Database(tmp_db_path)
     try:

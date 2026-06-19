@@ -46,6 +46,37 @@ def test_stats_frame_uses_diagnostics_snapshot():
     assert "get_diagnostics_snapshot" in src
     assert "_get_runtime_diagnostics" in src
     assert "_schedule_diagnostics_refresh" in src
+    assert "enabled_without_runner" in src
+    assert "cycle runtime:" in src
+    assert "cycle stale:" in src
+
+
+def test_accounts_refresh_does_not_mutate_check_or_send_timestamps():
+    refresh = _load_class_method_source("AccountsFrame", "refresh")
+    assert "UPDATE accounts SET last_check_ok_at" not in refresh
+    assert "last_check_ok_at=?" not in refresh
+    assert "last_send_at=?" not in refresh
+    assert "session_" not in refresh
+
+
+def test_account_health_inactive_is_not_formatted_as_active():
+    refresh = _load_class_method_source("AccountsFrame", "refresh")
+    assert 'health_raw == "active"' in refresh
+    assert '"active" in health_raw' not in refresh
+
+
+def test_stats_diagnostics_panel_shows_cycle_section():
+    init = _load_class_method_source("StatsFrame", "__init__")
+    update = _load_class_method_source("StatsFrame", "_update_diagnostics_panel")
+    runtime = _load_class_method_source("StatsFrame", "_get_runtime_diagnostics")
+
+    assert '("cycles",' in init
+    assert 'self.diag_labels["cycles"]' in update
+    assert "running_cycle_count" in update
+    assert "enabled_without_runner" in update
+    assert "waiting targets" in update
+    assert "blocked accounts" in update
+    assert "_cycle_runtime" in runtime
 
 
 def test_broadcast_error_brief_uses_human_reason():

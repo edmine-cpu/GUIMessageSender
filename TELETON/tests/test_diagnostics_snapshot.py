@@ -102,3 +102,45 @@ def test_get_diagnostics_snapshot_counts_accounts_tasks_and_errors(db_path):
     assert snapshot["errors"]["by_status"]["no_permission"] == 1
     assert snapshot["errors"]["by_status"]["flood_wait"] == 1
     assert any("нет прав" in item["reason"] for item in snapshot["errors"]["recent"])
+
+
+def test_get_diagnostics_snapshot_counts_cycle_campaigns_and_targets(db_path):
+    db = Database(db_path)
+    try:
+        campaign_id = db.get_or_create_cycle_campaign("DiagCycle")
+        db.set_cycle_campaign_enabled(campaign_id, True)
+        db.replace_cycle_targets(
+            campaign_id,
+            ["https://t.me/a", "https://t.me/b", "https://t.me/c"],
+            {},
+        )
+        targets = db.get_cycle_targets(campaign_id)
+        db.set_cycle_target_status(
+            targets[1]["id"],
+            "waiting",
+            retry_after=(datetime.now() + timedelta(minutes=5)).isoformat(),
+            last_error="wait",
+        )
+        db.set_cycle_target_status(
+            targets[2]["id"],
+            "error",
+            retry_after="",
+            last_error="boom",
+        )
+        db.add_cycle_state_stats(campaign_id, last_error="boom")
+
+        snapshot = db.get_diagnostics_snapshot(days=1)
+    finally:
+        db.close()
+
+    cycles = snapshot["cycles"]
+    assert cycles["summary"]["campaigns"] == 1
+    assert cycles["summary"]["enabled"] == 1
+    assert cycles["summary"]["enabled_with_targets"] == 1
+    assert cycles["summary"]["targets"] == 3
+    assert cycles["summary"]["active_targets"] == 1
+    assert cycles["summary"]["waiting_targets"] == 1
+    assert cycles["summary"]["error_targets"] == 1
+    assert cycles["items"][0]["name"] == "DiagCycle"
+    assert cycles["items"][0]["waiting_targets"] == 1
+    assert cycles["items"][0]["last_error"] == "boom"

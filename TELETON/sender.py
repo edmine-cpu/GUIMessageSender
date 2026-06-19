@@ -400,6 +400,7 @@ class TelegramSender:
         _retry: int = 0,
         min_interval_seconds: float = 2.0,
         daily_actions_limit: int = 200,
+        sleep_on_flood_wait: bool = True,
     ) -> str:
         """
         Отправка сообщения с упоминаниями.
@@ -421,6 +422,7 @@ class TelegramSender:
                     _retry + 1,
                     min_interval_seconds=min_interval_seconds,
                     daily_actions_limit=daily_actions_limit,
+                    sleep_on_flood_wait=sleep_on_flood_wait,
                 )
             print(f"  [!] {self.account.phone}: действие пропущено — {human_action_block_reason(reason, wait_s)}")
             self.db.log_account_action(self.account.phone, "group", group, "skip", reason)
@@ -445,9 +447,17 @@ class TelegramSender:
 
         except FloodWaitError as e:
             print(f"  [!] {human_exception(e)}")
+            wait_seconds = max(int(getattr(e, "seconds", 0) or 0), 1)
+            if not sleep_on_flood_wait:
+                flood_until = (datetime.now() + timedelta(seconds=wait_seconds)).isoformat()
+                self.db.set_account_flood_until(self.account.phone, flood_until)
+                self.db.log_account_action(self.account.phone, "group", group, "flood_wait", f"FloodWait {wait_seconds}s")
+                log_event(module="sender", campaign="", account=self.account.phone, target=group,
+                          action="send_group", status="flood_wait", error=f"FloodWait {wait_seconds}s")
+                return f"flood_wait:{wait_seconds}"
             if _retry < 3:
                 print(f"  [!] FloodWait {e.seconds}s — ожидание...")
-                await asyncio.sleep(e.seconds)
+                await asyncio.sleep(wait_seconds)
                 return await self.send_mention_message(
                     group,
                     text,
@@ -455,16 +465,17 @@ class TelegramSender:
                     _retry + 1,
                     min_interval_seconds=min_interval_seconds,
                     daily_actions_limit=daily_actions_limit,
+                    sleep_on_flood_wait=sleep_on_flood_wait,
                 )
             else:
                 print(f"  [!] FloodWait {e.seconds}s — превышен лимит retry")
                 # Ставим аккаунт на паузу до истечения flood
-                flood_until = (datetime.now() + timedelta(seconds=e.seconds)).isoformat()
+                flood_until = (datetime.now() + timedelta(seconds=wait_seconds)).isoformat()
                 self.db.set_account_flood_until(self.account.phone, flood_until)
-                self.db.log_account_action(self.account.phone, "group", group, "flood_wait", f"FloodWait {e.seconds}s")
+                self.db.log_account_action(self.account.phone, "group", group, "flood_wait", f"FloodWait {wait_seconds}s")
                 log_event(module="sender", campaign="", account=self.account.phone, target=group,
-                          action="send_group", status="flood_wait", error=f"FloodWait {e.seconds}s")
-                return "flood_wait"
+                          action="send_group", status="flood_wait", error=f"FloodWait {wait_seconds}s")
+                return f"flood_wait:{wait_seconds}"
 
         except SlowModeWaitError as e:
             wait = max(getattr(e, "seconds", 0) or 0, 1)
@@ -648,6 +659,7 @@ class TelegramSender:
         message: str,
         min_interval_seconds: float = 2.0,
         daily_actions_limit: int = 200,
+        sleep_on_flood_wait: bool = True,
     ) -> str:
         """Отправка обычного текстового сообщения (broadcast)."""
         return await self.send_mention_message(
@@ -656,6 +668,7 @@ class TelegramSender:
             entities=[],
             min_interval_seconds=min_interval_seconds,
             daily_actions_limit=daily_actions_limit,
+            sleep_on_flood_wait=sleep_on_flood_wait,
         )
 
     async def get_latest_message_id(self, chat: str) -> int:

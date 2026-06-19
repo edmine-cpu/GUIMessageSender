@@ -288,3 +288,69 @@ def test_cycle_send_path_passes_daily_actions_limit_to_sender():
         any(keyword.arg == "daily_actions_limit" for keyword in call.keywords)
         for call in send_calls
     ), "cycle send path must pass daily_actions_limit into sender.send_broadcast_message"
+
+
+def test_auto_resume_starts_from_saved_settings_without_overwriting_from_ui():
+    src = _load_gui_source()
+    methods = _find_class_methods(src, "BroadcastFrame")
+    resume = methods.get("_resume_enabled_cycles", "")
+    start = methods.get("_start_cycle", "")
+
+    assert "_start_cycle(save_current_settings=False)" in resume
+    assert "def _start_cycle(self, save_current_settings: bool = True)" in start
+    assert "if save_current_settings:" in start
+    assert "_cycle_save_current_campaign_settings(running_campaign_name)" in start
+
+
+def test_cycle_watchdog_cleans_dead_runner_instead_of_raw_pop():
+    src = _load_gui_source()
+    methods = _find_class_methods(src, "BroadcastFrame")
+    watchdog = methods.get("_cycle_watchdog", "")
+
+    assert "_cycle_finish_stopped_ui(name)" in watchdog
+    assert "runners.pop(name" not in watchdog
+    assert "_cycle_stale_enabled_names" in watchdog
+
+
+def test_cycle_send_path_returns_floodwait_to_runner_without_sender_sleep():
+    src = _load_gui_source()
+    start_node = _find_class_method_node(src, "BroadcastFrame", "_start_cycle")
+    assert start_node is not None
+    send_calls = [
+        node
+        for node in ast.walk(start_node)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "send_broadcast_message"
+        )
+    ]
+    assert send_calls
+    assert all(
+        any(
+            keyword.arg == "sleep_on_flood_wait"
+            and isinstance(keyword.value, ast.Constant)
+            and keyword.value.value is False
+            for keyword in call.keywords
+        )
+        for call in send_calls
+    )
+
+
+def test_cycle_runtime_progress_records_wait_reason_and_wait_seconds():
+    src = _load_gui_source()
+    methods = _find_class_methods(src, "BroadcastFrame")
+    start = methods.get("_start_cycle", "")
+    update_runtime = methods.get("_cycle_update_runtime", "")
+    snapshot = methods.get("_cycle_build_snapshot", "")
+    status = methods.get("_cycle_update_status", "")
+
+    assert '"wait_reason"' in update_runtime
+    assert '"wait_seconds"' in update_runtime
+    assert '"runtime_age_seconds"' in snapshot
+    assert "phase:" in status
+    assert "wait:" in status
+    assert 'phase="waiting:no_active_accounts"' in start
+    assert 'phase="waiting:account_limiter"' in start
+    assert 'phase="waiting:round_pause"' in start
+    assert 'phase="waiting:no_ready_targets"' in start
