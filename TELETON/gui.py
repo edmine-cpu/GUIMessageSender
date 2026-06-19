@@ -10557,6 +10557,41 @@ class BroadcastFrame(ctk.CTkFrame):
             self._set_broadcast_refresh_feedback("error", str(e))
             self._append_log(f"[refresh] tasks dashboard refresh failed: {e}")
 
+    def _broadcast_cycle_status_snapshot(self) -> dict | None:
+        try:
+            active_names = self._cycle_active_names()
+        except Exception:
+            active_names = []
+        if not active_names:
+            return None
+
+        old_name = getattr(self, "_cycle_campaign_name", "")
+        name = old_name if old_name in active_names else active_names[0]
+        restore_name = False
+        try:
+            if name != old_name:
+                self._cycle_campaign_name = name
+                restore_name = True
+            snap = self._cycle_build_snapshot()
+        except Exception:
+            return {
+                "name": name,
+                "active_count": len(active_names),
+                "snapshot": None,
+            }
+        finally:
+            if restore_name:
+                try:
+                    self._cycle_campaign_name = old_name
+                except Exception:
+                    pass
+
+        return {
+            "name": name,
+            "active_count": len(active_names),
+            "snapshot": snap,
+        }
+
     def _refresh_broadcast_status_panel(self):
         if not hasattr(self, "lbl_broadcast_state"):
             return
@@ -10586,6 +10621,40 @@ class BroadcastFrame(ctk.CTkFrame):
             t for t in all_tasks
             if getattr(t, "completed", False) or getattr(t, "status", "") == "done"
         ]
+
+        cycle_info = self._broadcast_cycle_status_snapshot()
+        if cycle_info:
+            snap = cycle_info.get("snapshot") or {}
+            active_count = int(cycle_info.get("active_count") or 0)
+            campaign_name = cycle_info.get("name") or "—"
+            total = int(snap.get("total", 0) or 0)
+            pos = int(snap.get("pos", 0) or 0)
+            position = f"{(pos + 1) if total else '—'}/{total or '—'}"
+            current_link = self._shorten_ui(snap.get("current_link", "—"), 90)
+            next_link = self._shorten_ui(snap.get("next_link", "—"), 90)
+            last_account = snap.get("last_account", "—")
+            last_error = snap.get("last_error", "—")
+            last_sent = snap.get("last_sent_at", "—")
+
+            self.lbl_broadcast_state.configure(text="Цикл выполняется", text_color="#22C55E")
+            self.lbl_broadcast_counts.configure(
+                text=(
+                    f"циклы: {active_count} | целей: {total} | активных: {snap.get('active_targets', 0)} | "
+                    f"ожидание: {snap.get('waiting_targets', 0)} | ошибки целей: {snap.get('error_targets', 0)} | "
+                    f"sent: {snap.get('sent_total', 0)} | err: {snap.get('error_total', 0)}"
+                )
+            )
+            self.lbl_broadcast_current.configure(
+                text=f"{campaign_name}: {current_link} | аккаунт: {last_account}"
+            )
+            self.lbl_broadcast_next.configure(text=f"{next_link} | позиция: {position}")
+            self.lbl_broadcast_success.configure(
+                text=f"Последний успех: {last_sent}" if last_sent != "—" else "Пока нет"
+            )
+            self.lbl_broadcast_errors.configure(
+                text=f"Ошибка цикла: {self._shorten_ui(last_error, 120)}" if last_error != "—" else "Пока нет"
+            )
+            return
 
         self._set_broadcast_state_label()
         self.lbl_broadcast_counts.configure(

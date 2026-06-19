@@ -65,6 +65,8 @@ def test_log_queue_routing_still_handles_broadcast_tags():
 def test_broadcast_dashboard_refresh_button_updates_status_and_tasks_table():
     panel_fn = _load_class_method_source("BroadcastFrame", "_build_broadcast_status_panel")
     feedback_fn = _load_class_method_source("BroadcastFrame", "_set_broadcast_refresh_feedback")
+    cycle_fn = _load_class_method_source("BroadcastFrame", "_broadcast_cycle_status_snapshot")
+    status_fn = _load_class_method_source("BroadcastFrame", "_refresh_broadcast_status_panel")
     refresh_fn = _load_class_method_source("BroadcastFrame", "_refresh_broadcast_dashboard")
 
     assert "self.btn_broadcast_dashboard_refresh = ctk.CTkButton" in panel_fn
@@ -87,6 +89,13 @@ def test_broadcast_dashboard_refresh_button_updates_status_and_tasks_table():
     assert "Обновлено" in feedback_fn
     assert "self.after(" in feedback_fn
     assert "Обновить" in feedback_fn
+
+    assert "self._cycle_active_names()" in cycle_fn
+    assert "self._cycle_build_snapshot()" in cycle_fn
+    assert "cycle_info = self._broadcast_cycle_status_snapshot()" in status_fn
+    assert "Цикл выполняется" in status_fn
+    assert "ошибки целей" in status_fn
+    assert "Ошибка цикла" in status_fn
 
 def test_message_template_variants_preserve_multiline_text():
     split_variants = _load_top_level_function("_split_message_template_variants")
