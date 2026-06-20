@@ -28,8 +28,8 @@ def _load_symbols_from_gui():
                     code = compile(ast.Module(body=[node], type_ignores=[]),
                                    filename="gui.py", mode="exec")
                     exec(code, namespace)
-        # Берём функцию _hint_for
-        if isinstance(node, ast.FunctionDef) and node.name == "_hint_for":
+        # Берём функции, от которых зависит _hint_for
+        if isinstance(node, ast.FunctionDef) and node.name in ("_safe_exception_text", "_hint_for"):
             code = compile(ast.Module(body=[node], type_ignores=[]),
                            filename="gui.py", mode="exec")
             exec(code, namespace)
@@ -129,3 +129,24 @@ class TestHintFor:
         e = OSError("permission denied")
         result = hint_for(e)
         assert "data/sessions" in result or "антивирус" in result.lower()
+
+    def test_opentele_no_account_loaded_is_specific(self, hints_and_func):
+        _, hint_for = hints_and_func
+
+        class OpenTeleException(Exception):
+            pass
+
+        e = OpenTeleException("No account has been loaded")
+        result = hint_for(e)
+        assert "не смог загрузить ни один аккаунт" in result
+        assert "вложенная tdata" in result
+
+    def test_broken_exception_str_does_not_break_hint(self, hints_and_func):
+        _, hint_for = hints_and_func
+
+        class OpenTeleException(Exception):
+            def __str__(self):
+                raise RuntimeError("broken __str__")
+
+        result = hint_for(OpenTeleException())
+        assert "Папка TData повреждена" in result or "key_datas" in result

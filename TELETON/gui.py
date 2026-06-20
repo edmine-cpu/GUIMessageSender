@@ -122,18 +122,38 @@ TDATA_ERROR_HINTS = {
 }
 
 
+def _safe_exception_text(e: BaseException) -> str:
+    """Вернуть текст exception, даже если у сторонней библиотеки сломан __str__."""
+    try:
+        text = str(e)
+    except Exception:
+        text = ""
+    if text:
+        return text
+
+    try:
+        text = repr(e)
+    except Exception:
+        text = ""
+    if text and text != f"{type(e).__name__}()":
+        return text
+
+    return type(e).__name__
+
+
 def _hint_for(e: BaseException) -> str:
     """Вернуть человеческую подсказку по исключению, либо str(e) как fallback."""
     name = type(e).__name__
-    text = str(e) or repr(e) or name
+    text = _safe_exception_text(e)
     if name == "OpenTeleException" and "No account has been loaded" in text:
         return (
-            "Папка внешне похожа на TData, но внутри не найден загружаемый аккаунт. "
-            "Частые причины: выбрана не та копия tdata, аккаунт не залогинен в этой папке, "
-            "TData повреждена/неполная, либо эту папку сейчас держит открытый Telegram Desktop. "
-            "Попробуй закрыть Telegram из этой папки и выбрать рабочую папку вида data\\<id>\\tdata."
+            "OpenTele прочитал ключевые файлы, но не смог загрузить ни один аккаунт. "
+            "Частые причины: выбрана папка-контейнер вместо конкретной tdata, внутри есть вложенная tdata, "
+            "аккаунт не залогинен в этой копии, TData неполная/повреждена, папку держит открытый Telegram Desktop, "
+            "либо формат свежего Telegram Desktop уже не разбирается установленной версией opentele. "
+            "Закрой Telegram из этой папки и попробуй выбрать именно рабочую папку tdata без Telegram.exe внутри."
         )
-    return TDATA_ERROR_HINTS.get(name, str(e) or name)
+    return TDATA_ERROR_HINTS.get(name, text or name)
 
 
 def _cycle_has_usable_config(targets_count: int, accounts_count: int) -> bool:
@@ -231,6 +251,100 @@ def _collect_tdata_dirs(root: str) -> list:
 
     found.sort()
     return found
+
+
+def _tdata_layout_diagnostics(path: str) -> dict:
+    info = {
+        "path": path or "",
+        "exists": bool(path and os.path.exists(path)),
+        "is_dir": bool(path and os.path.isdir(path)),
+        "key_files": [],
+        "hex_dirs": [],
+        "has_telegram_exe": False,
+        "direct_nested_tdata": "",
+        "nested_tdata": [],
+        "list_error": "",
+    }
+    if not info["is_dir"]:
+        return info
+
+    try:
+        names = os.listdir(path)
+    except Exception as e:
+        info["list_error"] = f"{type(e).__name__}: {_safe_exception_text(e)}"
+        return info
+
+    lower_names = {n.lower(): n for n in names}
+    info["has_telegram_exe"] = "telegram.exe" in lower_names
+    info["key_files"] = [n for n in names if n in ("key_datas", "key_datass")]
+    info["hex_dirs"] = [
+        n for n in names
+        if re.fullmatch(r"[0-9A-Fa-f]{16}", n)
+        and os.path.isdir(os.path.join(path, n))
+    ]
+
+    direct_nested = os.path.join(path, "tdata")
+    nested = []
+    if os.path.isdir(direct_nested):
+        info["direct_nested_tdata"] = direct_nested
+        if _is_tdata_dir(direct_nested):
+            nested.append(direct_nested)
+        else:
+            nested.extend(_collect_tdata_dirs(direct_nested))
+
+    abs_path = os.path.abspath(path)
+    for candidate in _collect_tdata_dirs(path):
+        try:
+            if os.path.abspath(candidate) == abs_path:
+                continue
+        except Exception:
+            pass
+        nested.append(candidate)
+
+    seen = set()
+    for candidate in nested:
+        ap = os.path.abspath(candidate)
+        if ap not in seen:
+            seen.add(ap)
+            info["nested_tdata"].append(candidate)
+    return info
+
+
+def _format_tdata_layout_diagnostics(path: str) -> str:
+    info = _tdata_layout_diagnostics(path)
+    if not info["exists"]:
+        return "папка не существует"
+    if not info["is_dir"]:
+        return "путь существует, но это не папка"
+    if info["list_error"]:
+        return f"не удалось прочитать список файлов: {info['list_error']}"
+
+    parts = [
+        f"key_datas: {'есть' if info['key_files'] else 'нет'}",
+        f"hex-папок: {len(info['hex_dirs'])}",
+    ]
+    if info["has_telegram_exe"]:
+        parts.append("в выбранной папке есть Telegram.exe")
+    if info["direct_nested_tdata"]:
+        parts.append(f"есть вложенная папка tdata: {info['direct_nested_tdata']}")
+    if info["nested_tdata"]:
+        shown = ", ".join(info["nested_tdata"][:3])
+        if len(info["nested_tdata"]) > 3:
+            shown += f", ещё {len(info['nested_tdata']) - 3}"
+        parts.append(f"найдены вложенные TData: {shown}")
+    return "; ".join(parts)
+
+
+def _format_tdata_read_error(tdata_path: str, e: BaseException) -> str:
+    err_name = type(e).__name__
+    err_text = _safe_exception_text(e)
+    hint = _hint_for(e)
+    layout = _format_tdata_layout_diagnostics(tdata_path)
+    return (
+        f"ошибка чтения TData ({err_name}) по пути {tdata_path}. "
+        f"OpenTele: {err_text}. Причина: {hint}. "
+        f"Структура папки: {layout}"
+    )
 
 
 def _import_result(source: str, ref: str = "", phone: str = "",
@@ -578,19 +692,22 @@ def import_tdata_dir_to_db(tdata_path: str, proxy: str,
     except BaseException as e:
         if isinstance(e, (KeyboardInterrupt, SystemExit)):
             raise
+        failure_text = _format_tdata_read_error(tdata_path, e)
         log_exception("accounts", e, context=f"TDesktop({tdata_path}) init failed")
         _emit(f"[!] Не могу прочитать TData: {type(e).__name__}")
+        _emit(f"[!] OpenTele: {_safe_exception_text(e)}")
         _emit(f"[!] Подсказка: {_hint_for(e)}")
+        _emit(f"[!] Структура папки: {_format_tdata_layout_diagnostics(tdata_path)}")
         return _summarize_import_results(
-            0, [], "fail_early",
-            f"ошибка чтения TData ({type(e).__name__}) по пути {tdata_path}",
+            0, [], "fail_early", failure_text,
         )
 
     if not tdesk.isLoaded() or tdesk.accountsCount == 0:
         _emit("[!] TData не содержит аккаунтов или повреждена")
         return _summarize_import_results(
             0, [], "fail",
-            "TData пустая или повреждена",
+            "TData прочитана, но OpenTele не нашёл ни одного аккаунта. "
+            f"Структура папки: {_format_tdata_layout_diagnostics(tdata_path)}",
         )
 
     expected = int(tdesk.accountsCount or 0)

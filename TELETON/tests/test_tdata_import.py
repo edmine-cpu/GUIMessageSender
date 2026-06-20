@@ -17,10 +17,14 @@ def _load_import_symbols():
 
     names = {
         "TDATA_ERROR_HINTS",
+        "_safe_exception_text",
         "_hint_for",
         "_try_with_flood_retry",
         "_is_tdata_dir",
         "_collect_tdata_dirs",
+        "_tdata_layout_diagnostics",
+        "_format_tdata_layout_diagnostics",
+        "_format_tdata_read_error",
         "_import_result",
         "_summarize_import_results",
         "_cleanup_session_files",
@@ -138,6 +142,26 @@ def _install_fake_opentele(monkeypatch, specs):
     monkeypatch.setitem(sys.modules, "opentele.api", api_mod)
 
 
+def _install_failing_opentele(monkeypatch, exc):
+    class FakeTDesktop:
+        def __init__(self, path):
+            raise exc
+
+    class FakeAPI:
+        @staticmethod
+        def TelegramDesktop(api_id, api_hash):
+            return {"api_id": api_id, "api_hash": api_hash}
+
+    monkeypatch.setitem(sys.modules, "opentele", types.ModuleType("opentele"))
+    td_mod = types.ModuleType("opentele.td")
+    td_mod.TDesktop = FakeTDesktop
+    api_mod = types.ModuleType("opentele.api")
+    api_mod.API = FakeAPI
+    api_mod.UseCurrentSession = object()
+    monkeypatch.setitem(sys.modules, "opentele.td", td_mod)
+    monkeypatch.setitem(sys.modules, "opentele.api", api_mod)
+
+
 def test_tdata_dir_detection(symbols, tmp_path):
     is_tdata = symbols["_is_tdata_dir"]
     collect = symbols["_collect_tdata_dirs"]
@@ -170,6 +194,29 @@ def test_tdata_invalid_and_container_fail_early(symbols, monkeypatch, tmp_path):
                        log_cb=lambda msg: None)
     assert res["kind"] == "fail_early"
     assert str(nested) in res["text"] or "TData" in res["text"]
+
+
+def test_tdata_opentele_no_account_loaded_has_actionable_summary(symbols, monkeypatch, tmp_path):
+    import_tdata = symbols["import_tdata_dir_to_db"]
+    tdata = _make_tdata_dir(tmp_path / "acc" / "tdata")
+    (tdata / "Telegram.exe").write_text("fake", encoding="utf-8")
+    nested = _make_tdata_dir(tdata / "tdata")
+    db_path = tmp_path / "db.sqlite"
+    sessions = tmp_path / "sessions"
+
+    class OpenTeleException(Exception):
+        pass
+
+    _install_failing_opentele(monkeypatch, OpenTeleException("No account has been loaded"))
+
+    res = import_tdata(str(tdata), "", str(sessions), str(db_path),
+                       log_cb=lambda msg: None)
+
+    assert res["kind"] == "fail_early"
+    assert "No account has been loaded" in res["text"]
+    assert "не смог загрузить ни один аккаунт" in res["text"]
+    assert "Telegram.exe" in res["text"]
+    assert str(nested) in res["text"]
 
 
 def test_tdata_success_adds_real_phone_and_desktop_fields(symbols, monkeypatch, tmp_path):
