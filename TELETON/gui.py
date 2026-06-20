@@ -7046,7 +7046,7 @@ class BroadcastFrame(ctk.CTkFrame):
         self.c_template_menu.configure(values=values)
         if current not in values:
             self.c_template_var.set(values[0])
-        message_templates = [t for t in templates_all if t.get("kind") == "messages"]
+        message_templates = [t for t in templates_all if t.get("kind") in ("messages", "mixed")]
         self._cycle_message_template_by_name = {t["name"]: t for t in message_templates}
         if hasattr(self, "c_message_template_menu"):
             msg_values = list(self._cycle_message_template_by_name.keys()) or ["—"]

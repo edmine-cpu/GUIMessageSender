@@ -144,3 +144,15 @@ def test_message_template_modes_use_multiline_variant_helper():
     assert "_templates_m = _split_message_template_variants(message)" in src
     assert "templates_cache = _split_message_template_variants(msg_text)" in src
     assert "templates = _split_message_template_variants(task.message_text)" in src
+
+
+def test_cycle_text_template_dropdown_includes_mixed_templates():
+    refresh = _load_class_method_source("BroadcastFrame", "_refresh_cycle_templates")
+
+    assert 't.get("kind") in ("groups", "mixed")' in refresh
+    message_filter = refresh.split("message_templates =", 1)[1].split(
+        "self._cycle_message_template_by_name", 1
+    )[0]
+    assert 't.get("kind") in ("messages", "mixed")' in message_filter
+    assert '"groups"' not in message_filter
+    assert '"channels"' not in message_filter
