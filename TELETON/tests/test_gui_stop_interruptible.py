@@ -230,6 +230,29 @@ def test_mass_start_does_not_force_clear_regular_running_flag():
     assert "_regular_worker_alive()" in mass_start
 
 
+def test_mass_start_skips_mentions_when_unconfigured():
+    methods = _find_class_methods(_load_gui_source(), "BroadcastFrame")
+    mass_start = methods.get("_mass_start_everything", "")
+    mention_config = methods.get("_mass_mention_has_config", "")
+
+    assert mass_start
+    assert mention_config
+    assert "self._mass_mention_has_config()" in mass_start
+    assert "not target or not source" in mention_config
+    assert "return bool(message)" in mention_config
+
+
+def test_cycle_does_not_apply_full_send_delay_after_non_send_status():
+    methods = _find_class_methods(_load_gui_source(), "BroadcastFrame")
+    start_cycle = methods.get("_start_cycle", "")
+
+    assert start_cycle
+    assert 'status not in ("sent", "dry_run")' in start_cycle
+    assert "no_full_delay_statuses" in start_cycle
+    assert '"chat_banned"' in start_cycle
+    assert "waiting:retry_delay" in start_cycle
+
+
 def test_broadcastframe_workers_use_interruptible_wait_wrappers():
     methods = _find_class_methods(_load_gui_source(), "BroadcastFrame")
     expectations = {

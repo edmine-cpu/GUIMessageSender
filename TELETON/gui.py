@@ -6294,6 +6294,22 @@ class BroadcastFrame(ctk.CTkFrame):
         except Exception:
             pass
 
+    def _mass_mention_has_config(self) -> bool:
+        """Return True only when the mention tab has enough data to start."""
+        try:
+            target = (self.m_target.get() or "").strip()
+            source = (self.m_source.get() or "").strip()
+            source_mode = self.m_source_var.get()
+            message = self.m_message.get("1.0", "end").strip()
+        except Exception:
+            return False
+
+        if not target or not source:
+            return False
+        if source_mode == "Избранное":
+            return True
+        return bool(message)
+
     def _mass_start_everything(self):
         """Массовый запуск ВСЁ СРАЗУ.
         Запускает enabled циклы + обработчик задач рассылки (broadcast queue).
@@ -6362,10 +6378,10 @@ class BroadcastFrame(ctk.CTkFrame):
             self._append_log(f"[!] Задачи рассылки: {e}")
 
         # Упоминания можно запускать отдельно из своей под-вкладки.
-
-        # 4. Упоминания (если кнопка активна / данные есть)
+        # In mass mode, start them only when configured; otherwise _start_mention
+        # emits a validation error that looks like a failed cycle start.
         try:
-            if hasattr(self, "_start_mention"):
+            if hasattr(self, "_start_mention") and self._mass_mention_has_config():
                 if getattr(self, "_running", False) or self._regular_worker_alive():
                     self._append_log("[🚀] Упоминания не запущены: уже работает очередь/проверка/другой обычный процесс.")
                 else:
@@ -9453,6 +9469,36 @@ class BroadcastFrame(ctk.CTkFrame):
                             delay = random.uniform(send_delay_min_seconds, send_delay_max_seconds) if send_delay_max_seconds > send_delay_min_seconds else float(send_delay_min_seconds)
                             if dry_run:
                                 log_queue.put(("cycle_log", f"[DRY] Пауза {delay:.0f}с пропущена"))
+                            elif status not in ("sent", "dry_run"):
+                                no_full_delay_statuses = {
+                                    "chat_banned",
+                                    "need_subscription",
+                                    "no_permission",
+                                    "private",
+                                    "slow_mode",
+                                    "flood_wait",
+                                    "banned",
+                                }
+                                if status in no_full_delay_statuses:
+                                    log_queue.put(("cycle_log", f"[i] {link}: {status} - длинная пауза отправки не применяется, перехожу дальше"))
+                                else:
+                                    short_delay = max(1.0, min(float(delay), 10.0))
+                                    _emit_cycle_progress(
+                                        account=acc.phone,
+                                        current_target=link,
+                                        next_target=targets[current_pos]["link"] if targets else "",
+                                        phase="waiting:retry_delay",
+                                        wait_reason=f"retry after {status}",
+                                        wait_seconds=short_delay,
+                                    )
+                                    await _sleep_interruptibly(
+                                        short_delay,
+                                        stop_event,
+                                        op_name="циклическая рассылка",
+                                        account=acc.phone,
+                                        target=link,
+                                        progress=f"позиция={(current_pos % len(targets)) + 1}/{len(targets)}",
+                                    )
                             else:
                                 _emit_cycle_progress(
                                     account=acc.phone,
