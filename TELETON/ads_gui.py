@@ -533,7 +533,7 @@ class AdDialog(ctk.CTkToplevel):
         db = AdsDB(self.app.config.db_path)
         from database import Database
         main_db = Database(self.app.config.db_path)
-        accounts = [a.phone for a in main_db.get_all_accounts() if a.is_active]
+        accounts = [a.phone for a in main_db.get_active_accounts()]
         main_db.close()
         db.close()
         self.acc_var = ctk.StringVar(
@@ -1386,7 +1386,7 @@ class SchedulerTab(ctk.CTkFrame):
 
         from database import Database
         main_db = Database(self.app.config.db_path)
-        accounts = [a for a in main_db.get_all_accounts() if a.is_active]
+        accounts = main_db.get_active_accounts()
         main_db.close()
 
         if not accounts:
@@ -1708,7 +1708,7 @@ class QuickLaunchTab(ctk.CTkFrame):
         from database import Database as MainDB
         main_db = MainDB(self.app.config.db_path)
         try:
-            accounts = [a for a in main_db.get_all_accounts() if a.is_active]
+            accounts = main_db.get_active_accounts()
         finally:
             main_db.close()
         phones = [a.phone for a in accounts]
@@ -1841,7 +1841,7 @@ class QuickLaunchTab(ctk.CTkFrame):
         from database import Database as MainDB
         main_db = MainDB(self.app.config.db_path)
         try:
-            accounts = main_db.get_all_accounts()
+            accounts = main_db.get_active_accounts()
         finally:
             main_db.close()
         dlg = AccountsPickerDialog(self, accounts=accounts, selected_phones=self._selected_accounts)
@@ -1976,7 +1976,7 @@ class QuickLaunchTab(ctk.CTkFrame):
         from database import Database as MainDB
         main_db = MainDB(self.app.config.db_path)
         try:
-            accounts = {a.phone: a for a in main_db.get_all_accounts() if a.is_active}
+            accounts = {a.phone: a for a in main_db.get_active_accounts()}
         finally:
             main_db.close()
 

@@ -6,7 +6,7 @@ import types
 import pytest
 
 from database import Database
-from models import Account
+from models import Account, ACCOUNT_STATUS_BANNED
 
 
 def _load_import_symbols():
@@ -258,6 +258,8 @@ def test_tdata_reimport_updates_existing_without_fail(symbols, monkeypatch, tmp_
             session_name="old",
             is_active=False,
             sent_today=7,
+            status=ACCOUNT_STATUS_BANNED,
+            last_status_change="2026-01-01T00:00:00 | banned | test",
             paused_until="2099-01-01T00:00:00",
             custom_name="keep-me",
         ))
@@ -277,6 +279,8 @@ def test_tdata_reimport_updates_existing_without_fail(symbols, monkeypatch, tmp_
     finally:
         db.close()
     assert acc.is_active is False
+    assert acc.status == ACCOUNT_STATUS_BANNED
+    assert acc.last_status_change == "2026-01-01T00:00:00 | banned | test"
     assert acc.sent_today == 7
     assert acc.paused_until == "2099-01-01T00:00:00"
     assert acc.custom_name == "keep-me"

@@ -832,7 +832,10 @@ class Database:
 
             state = acc.status or "active"
             why = ""
-            if not acc.is_active:
+            if acc.status == ACCOUNT_STATUS_BANNED:
+                state = ACCOUNT_STATUS_BANNED
+                why = "бан Telegram"
+            elif not acc.is_active:
                 state = "inactive"
                 why = "выключен пользователем"
             else:
@@ -903,10 +906,16 @@ class Database:
         """Установить статус аккаунта с меткой времени и причиной."""
         now = datetime.now().isoformat()
         stamp = f"{now} | {status} | {reason[:200]}"
-        self.conn.execute(
-            "UPDATE accounts SET status=?, last_status_change=? WHERE phone=?",
-            (status, stamp, phone),
-        )
+        if status == ACCOUNT_STATUS_BANNED:
+            self.conn.execute(
+                "UPDATE accounts SET is_active=0, status=?, last_status_change=? WHERE phone=?",
+                (status, stamp, phone),
+            )
+        else:
+            self.conn.execute(
+                "UPDATE accounts SET status=?, last_status_change=? WHERE phone=?",
+                (status, stamp, phone),
+            )
         self.conn.commit()
 
     def set_account_flood_until(self, phone: str, flood_until_iso: str):

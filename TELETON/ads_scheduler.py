@@ -356,6 +356,8 @@ class AdsScheduler:
         self._CONNECT_TIMEOUT_SECONDS = 30.0
         self._AUTH_TIMEOUT_SECONDS = 20.0
         self._DISCONNECT_TIMEOUT_SECONDS = 10.0
+        self._ACCOUNT_HEALTH_RECHECK_SECONDS = 15 * 60
+        self._last_account_health_check_at: Optional[datetime] = None
         self._IDLE_GUI_LOG_INTERVAL_SECONDS = 300
         self._last_idle_gui_log_at: Optional[datetime] = None
         self._last_idle_gui_log_signature = ""
@@ -407,6 +409,115 @@ class AdsScheduler:
             self._last_idle_gui_log_signature = signature
             self._last_idle_gui_log_at = now
 
+    def _account_health_check_due(self) -> bool:
+        if self._last_account_health_check_at is None:
+            return True
+        return (
+            _now() - self._last_account_health_check_at
+        ).total_seconds() >= self._ACCOUNT_HEALTH_RECHECK_SECONDS
+
+    def _account_can_attempt_connect(self) -> tuple[bool, str]:
+        try:
+            from database import Database
+            db = Database(self.db_path)
+            try:
+                rows = db.get_accounts_health()
+            finally:
+                db.close()
+        except Exception as e:
+            log_to_file("ads", f"[-] account health read failed for {self.account_phone}: {e}")
+            return True, ""
+
+        health = next(
+            (h for h in rows if h.get("phone") == self.account_phone),
+            None,
+        )
+        if not health:
+            return False, "not_found"
+
+        state = (health.get("health") or "active").strip().lower()
+        if state in ("banned", "needs_reauth", "inactive", "paused", "flood_wait"):
+            why = (health.get("why") or health.get("last_error_text") or state).strip()
+            return False, f"{state}: {why}" if why else state
+        return True, ""
+
+    @staticmethod
+    def _classify_connect_exception(e: Exception) -> tuple[str, str]:
+        name = type(e).__name__
+        if name in {
+            "UserDeactivatedBanError",
+            "PhoneNumberBannedError",
+            "UserDeactivatedError",
+        }:
+            return "banned", name
+        if name in {
+            "AuthKeyDuplicatedError",
+            "AuthKeyUnregisteredError",
+            "AuthKeyInvalidError",
+            "SessionExpiredError",
+            "SessionRevokedError",
+        }:
+            return "needs_reauth", name
+        if isinstance(e, (ConnectionError, OSError, TimeoutError, asyncio.TimeoutError)):
+            return "network", name
+        return "error", name
+
+    def _record_account_connect_success(self):
+        try:
+            from database import Database
+            db = Database(self.db_path)
+            try:
+                db.on_connect_success(self.account_phone)
+            finally:
+                db.close()
+            self._last_account_health_check_at = _now()
+        except Exception as e:
+            log_to_file("ads", f"[-] account connect success write failed for {self.account_phone}: {e}")
+
+    def _record_account_connect_problem(self, kind: str, reason: str):
+        try:
+            from database import Database
+            from models import ACCOUNT_STATUS_BANNED, ACCOUNT_STATUS_NEEDS_REAUTH
+
+            db = Database(self.db_path)
+            try:
+                if kind == "banned":
+                    db.set_account_status(self.account_phone, ACCOUNT_STATUS_BANNED, reason)
+                    db.log_account_action(
+                        self.account_phone, "ads_connect", "", "banned", reason)
+                elif kind == "needs_reauth":
+                    db.set_account_status(self.account_phone, ACCOUNT_STATUS_NEEDS_REAUTH, reason)
+                    db.record_connect_problem(self.account_phone, reason)
+                elif kind == "network":
+                    db.on_connect_network_issue(self.account_phone, reason)
+                else:
+                    db.on_connect_error(self.account_phone, reason)
+            finally:
+                db.close()
+        except Exception as e:
+            log_to_file("ads", f"[-] account connect problem write failed for {self.account_phone}: {e}")
+
+    async def _check_client_authorized(self, client) -> bool:
+        try:
+            authorized = await asyncio.wait_for(
+                client.is_user_authorized(), timeout=self._AUTH_TIMEOUT_SECONDS)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            kind, reason = self._classify_connect_exception(e)
+            self._record_account_connect_problem(kind, reason)
+            self.log_cb(f"[!] Account {self.account_phone} auth check failed: {reason}")
+            return False
+
+        if not authorized:
+            reason = "is_user_authorized=False"
+            self._record_account_connect_problem("needs_reauth", reason)
+            self.log_cb(f"[!] Account {self.account_phone} is not authorized; marked needs_reauth")
+            return False
+
+        self._record_account_connect_success()
+        return True
+
     # ─── Внутренний цикл ─────────────────────────────────────────────────────
 
     def _run(self):
@@ -442,7 +553,7 @@ class AdsScheduler:
             # Дисконнектим клиент при остановке планировщика
             await self._disconnect_client()
 
-    async def _ensure_connected_client(self):
+    async def _ensure_connected_client(self, force_auth_check: bool = False):
         """Получить подключённый и авторизованный клиент.
         Создаёт новый через фабрику если клиента нет или он отключён.
         Возвращает клиент или None при ошибке.
@@ -451,6 +562,11 @@ class AdsScheduler:
         if self._client is not None:
             try:
                 if self._client.is_connected():
+                    if force_auth_check:
+                        if await self._check_client_authorized(self._client):
+                            return self._client
+                        await self._disconnect_client()
+                        return None
                     return self._client
             except Exception:
                 pass
@@ -473,7 +589,7 @@ class AdsScheduler:
                     return None
             client = self.client_factory()
             await asyncio.wait_for(client.connect(), timeout=self._CONNECT_TIMEOUT_SECONDS)
-            if not await asyncio.wait_for(client.is_user_authorized(), timeout=self._AUTH_TIMEOUT_SECONDS):
+            if not await self._check_client_authorized(client):
                 self.log_cb(f"[!] Аккаунт {self.account_phone} не авторизован")
                 try:
                     await asyncio.wait_for(client.disconnect(), timeout=self._DISCONNECT_TIMEOUT_SECONDS)
@@ -484,6 +600,8 @@ class AdsScheduler:
             self._client = client
             return client
         except Exception as e:
+            kind, reason = self._classify_connect_exception(e)
+            self._record_account_connect_problem(kind, reason)
             self.log_cb(f"[-] {self.account_phone}: {human_exception(e)}")
             self.log_cb(f"[-] Не удалось подключить клиент {self.account_phone}: {e}")
             if client is not None:
@@ -540,6 +658,19 @@ class AdsScheduler:
                     f"аккаунта (есть {len(ads)} ads, но account_phone не совпадает)",
                     signature=f"no-account-ads:{len(ads)}",
                 )
+                return
+
+            can_connect, block_reason = self._account_can_attempt_connect()
+            if not can_connect:
+                self._log_idle(
+                    f"[!] tick {self.account_phone}: account blocked - {block_reason}",
+                    signature=f"account-blocked:{block_reason}",
+                )
+                return
+
+            client = await self._ensure_connected_client(
+                force_auth_check=self._account_health_check_due())
+            if client is None:
                 return
 
             # Глобальная проверка лимитов

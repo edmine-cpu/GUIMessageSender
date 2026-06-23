@@ -248,3 +248,25 @@ class TestDeactivateAccount:
         restored = db.get_all_accounts()[0]
         assert restored.is_active is False
         assert restored.status == ACCOUNT_STATUS_BANNED
+
+        health = db.get_accounts_health()[0]
+        assert health["health"] == ACCOUNT_STATUS_BANNED
+
+
+class TestSetAccountStatus:
+    def test_banned_status_disables_account_and_reports_banned_health(self, db):
+        db.add_account(_make_account(phone="+79002020202", is_active=True))
+
+        db.set_account_status(
+            "+79002020202",
+            ACCOUNT_STATUS_BANNED,
+            "PhoneNumberBannedError",
+        )
+
+        restored = db.get_all_accounts()[0]
+        assert restored.is_active is False
+        assert restored.status == ACCOUNT_STATUS_BANNED
+
+        health = db.get_accounts_health()[0]
+        assert health["is_active"] is False
+        assert health["health"] == ACCOUNT_STATUS_BANNED

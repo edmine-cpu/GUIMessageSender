@@ -2970,7 +2970,13 @@ class CycleCampaignAccountsDialog(ctk.CTkToplevel):
         self.result = None
         self.grab_set()
 
-        self._available = [a for a in (accounts or []) if getattr(a, "is_active", False)]
+        self._available = [
+            a for a in (accounts or [])
+            if getattr(a, "is_active", False)
+            and getattr(a, "status", ACCOUNT_STATUS_ACTIVE) == ACCOUNT_STATUS_ACTIVE
+            and not getattr(a, "flood_until", "")
+            and not getattr(a, "paused_until", "")
+        ]
         initial = [(p or "").strip() for p in (selected_phones or []) if (p or "").strip()]
         available_set = {a.phone for a in self._available}
         self._selected: list[str] = [p for p in initial if p in available_set]
@@ -3980,15 +3986,11 @@ class AccountsFrame(ctk.CTkFrame):
                                 }
 
                                 if existing_acc is not None:
-                                    new_acc = Account(
-                                        phone=phone,
-                                        session_name=standard_path,
-                                        proxy=proxy,
-                                        is_active=existing_acc.is_active,
-                                        sent_today=existing_acc.sent_today,
-                                        last_reset_date=existing_acc.last_reset_date,
-                                        **tdata_device,
-                                    )
+                                    new_acc = existing_acc
+                                    new_acc.session_name = standard_path
+                                    new_acc.proxy = proxy
+                                    for key, value in tdata_device.items():
+                                        setattr(new_acc, key, value)
                                 else:
                                     new_acc = Account(
                                         phone=phone,
@@ -5026,12 +5028,12 @@ class ParsingFrame(ctk.CTkFrame):
 
     def _refresh_accounts(self):
         db = Database(self.app.config.db_path)
-        accounts = db.get_all_accounts()
+        accounts = db.get_active_accounts()
         db.close()
 
         self._refresh_account_maps()
 
-        active = [a for a in accounts if a.is_active]
+        active = accounts
         if active:
             # Для меню используем красивые строки, но var всё равно хранит телефон (через set после configure)
             displays = [self._phone_to_display.get(a.phone, a.phone) for a in active]
@@ -5956,9 +5958,9 @@ class AudiencesFrame(ctk.CTkFrame):
 
         # Обновить список аккаунтов
         db = Database(self.app.config.db_path)
-        accounts = db.get_all_accounts()
+        accounts = db.get_active_accounts()
         db.close()
-        phones = [a.phone for a in accounts if a.is_active]
+        phones = [a.phone for a in accounts]
         if phones:
             self.dm_account_menu.configure(values=phones)
             self.dm_account_var.set(phones[0])
@@ -6020,7 +6022,7 @@ class AudiencesFrame(ctk.CTkFrame):
                 db = Database(config.db_path)
 
                 # Найти аккаунт
-                accounts = db.get_all_accounts()
+                accounts = db.get_active_accounts()
                 account = None
                 for a in accounts:
                     if a.phone == phone:
@@ -7415,7 +7417,7 @@ class BroadcastFrame(ctk.CTkFrame):
         try:
             campaign_id = db.get_or_create_cycle_campaign(self._cycle_campaign_name)
             selected = db.get_cycle_campaign_account_phones(campaign_id)
-            accounts = db.get_all_accounts()
+            accounts = db.get_active_accounts()
         finally:
             db.close()
 
@@ -9884,9 +9886,9 @@ class BroadcastFrame(ctk.CTkFrame):
     def _refresh_accounts(self):
         """Обновить списки аккаунтов в обоих меню рассылки"""
         db = Database(self.app.config.db_path)
-        accounts = db.get_all_accounts()
+        accounts = db.get_active_accounts()
         db.close()
-        phones = [a.phone for a in accounts if a.is_active]
+        phones = [a.phone for a in accounts]
         values = ["Все активные"] + phones
         self.m_account_menu.configure(values=values)
         self.b_account_menu.configure(values=values)
@@ -11931,7 +11933,7 @@ class ChannelCommenterFrame(ctk.CTkFrame):
 
     def _refresh_accounts(self):
         db = Database(self.app.config.db_path)
-        accounts = db.get_all_accounts()
+        accounts = db.get_active_accounts()
         db.close()
         displays = [format_account(a.phone, getattr(a, "custom_name", "")) for a in accounts]
         self.account_combo.configure(values=displays)
@@ -11948,7 +11950,7 @@ class ChannelCommenterFrame(ctk.CTkFrame):
             self.log.append("[!] Выберите аккаунт")
             return None
         db = Database(self.app.config.db_path)
-        accounts = db.get_all_accounts()
+        accounts = db.get_active_accounts()
         db.close()
         for a in accounts:
             if a.phone == phone:
@@ -12293,7 +12295,7 @@ class AutoReplyFrame(ctk.CTkFrame):
 
     def _refresh_accounts(self):
         db = Database(self.app.config.db_path)
-        accounts = db.get_all_accounts()
+        accounts = db.get_active_accounts()
         db.close()
         displays = [format_account(a.phone, getattr(a, "custom_name", "")) for a in accounts]
         self.account_combo.configure(values=displays)
@@ -12309,7 +12311,7 @@ class AutoReplyFrame(ctk.CTkFrame):
             self.log.append("[!] Выберите аккаунт")
             return None
         db = Database(self.app.config.db_path)
-        accounts = db.get_all_accounts()
+        accounts = db.get_active_accounts()
         db.close()
         for a in accounts:
             if a.phone == phone:
@@ -13116,7 +13118,8 @@ class StatsFrame(ctk.CTkFrame):
         self.diag_labels["accounts"].configure(text=(
             f"активно: {accounts.get('enabled', 0)} | доступно сейчас: {accounts.get('available', 0)} | "
             f"flood wait: {accounts.get('flood_wait', 0)} | reauth: {accounts.get('needs_reauth', 0)} | "
-            f"proxy/network: {accounts.get('network_issue', 0)} | ошибок сегодня: {accounts.get('errors_today', 0)}"
+            f"ban: {accounts.get('banned', 0)} | proxy/network: {accounts.get('network_issue', 0)} | "
+            f"ошибок сегодня: {accounts.get('errors_today', 0)}"
         ))
         self.diag_labels["tasks"].configure(text=(
             f"всего: {tasks.get('total', 0)} | готово: {tasks.get('pending', 0)} | "

@@ -70,16 +70,33 @@ with tempfile.TemporaryDirectory(prefix="tdata_imp_") as tmp:
                 try:
                     phone = asyncio.run(_import_one(acc, spath))
                     conn = sqlite3.connect(DB)
-                    # ONLY columns that actually exist in this DB (from PRAGMA)
-                    conn.execute("""
-                        INSERT OR REPLACE INTO accounts
-                        (phone, session_name, proxy, api_id, api_hash, device_model, system_version,
-                         app_version, lang_code, is_active, custom_name, status, last_error_text)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-                    """, (phone, spath, PROXY,
-                          FPRINT["api_id"], FPRINT["api_hash"],
-                          FPRINT["device_model"], FPRINT["system_version"], FPRINT["app_version"],
-                          FPRINT["lang_code"], 1, "", "active", ""))
+                    existing = conn.execute(
+                        "SELECT 1 FROM accounts WHERE phone=?", (phone,)
+                    ).fetchone()
+                    if existing:
+                        conn.execute("""
+                            UPDATE accounts
+                            SET session_name=?, proxy=?, api_id=?, api_hash=?,
+                                device_model=?, system_version=?, app_version=?,
+                                lang_code=?
+                            WHERE phone=?
+                        """, (
+                            spath, PROXY,
+                            FPRINT["api_id"], FPRINT["api_hash"],
+                            FPRINT["device_model"], FPRINT["system_version"],
+                            FPRINT["app_version"], FPRINT["lang_code"],
+                            phone,
+                        ))
+                    else:
+                        conn.execute("""
+                            INSERT INTO accounts
+                            (phone, session_name, proxy, api_id, api_hash, device_model, system_version,
+                             app_version, lang_code, is_active, custom_name, status, last_error_text)
+                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        """, (phone, spath, PROXY,
+                              FPRINT["api_id"], FPRINT["api_hash"],
+                              FPRINT["device_model"], FPRINT["system_version"], FPRINT["app_version"],
+                              FPRINT["lang_code"], 1, "", "active", ""))
                     conn.commit()
                     conn.close()
                     print("  + IMPORTED", phone, "proxy=", repr(PROXY))
