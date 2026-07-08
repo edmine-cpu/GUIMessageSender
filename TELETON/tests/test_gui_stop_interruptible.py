@@ -384,6 +384,7 @@ def test_broadcastframe_workers_do_not_await_key_telegram_calls_directly():
         "await sender.connect()",
         "await ensure_chat_access(",
         "await sender.get_saved_messages(",
+        "await sender.get_saved_message_templates(",
         "await sender.send_broadcast_message(",
         "await sender.send_mention_message(",
         "await sender.send_dm(",

@@ -2,6 +2,7 @@ import asyncio
 import threading
 import sys
 import re
+from dataclasses import dataclass
 from urllib.parse import urlparse
 from datetime import datetime, timedelta
 
@@ -41,6 +42,35 @@ from database import Database
 from config import Config, OWN_API_ID, OWN_API_HASH
 from diagnostics import human_action_block_reason, human_exception, human_reason
 from file_logger import log_event
+
+
+@dataclass(frozen=True)
+class SavedMessageTemplate:
+    message: object
+    text: str
+
+    @property
+    def media(self):
+        return getattr(self.message, "media", None)
+
+    @property
+    def entities(self) -> list:
+        return list(getattr(self.message, "entities", None) or [])
+
+    @property
+    def reply_markup(self):
+        return getattr(self.message, "reply_markup", None)
+
+    @property
+    def is_rich(self) -> bool:
+        return bool(self.media or self.entities or self.reply_markup)
+
+    @property
+    def is_usable(self) -> bool:
+        return bool((self.text or "").strip() or self.is_rich)
+
+    def strip(self) -> str:
+        return (self.text or "").strip()
 
 
 class TelegramSender:
@@ -673,6 +703,147 @@ class TelegramSender:
             sleep_on_flood_wait=sleep_on_flood_wait,
         )
 
+    async def send_saved_message(
+        self,
+        group: str,
+        saved_message,
+        _retry: int = 0,
+        min_interval_seconds: float = 2.0,
+        daily_actions_limit: int = 200,
+        sleep_on_flood_wait: bool = True,
+    ) -> str:
+        """Send a Saved Messages template as a Telegram message copy."""
+        if isinstance(saved_message, SavedMessageTemplate):
+            source_message = saved_message.message
+        else:
+            source_message = saved_message
+
+        if isinstance(source_message, str):
+            return await self.send_broadcast_message(
+                group,
+                source_message,
+                min_interval_seconds=min_interval_seconds,
+                daily_actions_limit=daily_actions_limit,
+                sleep_on_flood_wait=sleep_on_flood_wait,
+            )
+
+        ok, reason, wait_s = self.db.try_acquire_action_slot(
+            self.account.phone,
+            "group",
+            min_interval_seconds=min_interval_seconds,
+            daily_actions_limit=daily_actions_limit,
+        )
+        if not ok:
+            if reason == "min_interval" and wait_s > 0 and _retry < 3:
+                await asyncio.sleep(min(wait_s, 5.0))
+                return await self.send_saved_message(
+                    group,
+                    saved_message,
+                    _retry + 1,
+                    min_interval_seconds=min_interval_seconds,
+                    daily_actions_limit=daily_actions_limit,
+                    sleep_on_flood_wait=sleep_on_flood_wait,
+                )
+            print(f"  [!] {self.account.phone}: action skipped - {human_action_block_reason(reason, wait_s)}")
+            self.db.log_account_action(self.account.phone, "group", group, "skip", reason)
+            log_event(module="sender", campaign="", account=self.account.phone, target=group,
+                      action="send_group", status="skip", error=reason)
+            if reason in ("flood_wait", "daily_limit", "paused", "min_interval", "inactive", "needs_reauth", "banned"):
+                return f"{reason}:{int(wait_s)}" if wait_s else reason
+            return "error"
+
+        try:
+            msg = await asyncio.wait_for(
+                self.client.send_message(group, source_message),
+                timeout=self._SEND_TIMEOUT_SECONDS,
+            )
+            self.sent_count += 1
+            print(f"  [+] Sent Saved Messages copy to {group} ({self.account.phone})")
+            msg_id = int(getattr(msg, "id", 0) or 0)
+            self.db.log_account_action(self.account.phone, "group", group, "sent", str(msg_id) if msg_id else "")
+            log_event(module="sender", campaign="", account=self.account.phone, target=group,
+                      action="send_group", status="sent", error=str(msg_id) if msg_id else "")
+            return f"sent:{msg_id}" if msg_id else "sent"
+
+        except FloodWaitError as e:
+            print(f"  [!] {human_exception(e)}")
+            wait_seconds = max(int(getattr(e, "seconds", 0) or 0), 1)
+            if not sleep_on_flood_wait:
+                flood_until = (datetime.now() + timedelta(seconds=wait_seconds)).isoformat()
+                self.db.set_account_flood_until(self.account.phone, flood_until)
+                self.db.log_account_action(self.account.phone, "group", group, "flood_wait", f"FloodWait {wait_seconds}s")
+                log_event(module="sender", campaign="", account=self.account.phone, target=group,
+                          action="send_group", status="flood_wait", error=f"FloodWait {wait_seconds}s")
+                return f"flood_wait:{wait_seconds}"
+            if _retry < 3:
+                print(f"  [!] FloodWait {e.seconds}s - waiting...")
+                await asyncio.sleep(wait_seconds)
+                return await self.send_saved_message(
+                    group,
+                    saved_message,
+                    _retry + 1,
+                    min_interval_seconds=min_interval_seconds,
+                    daily_actions_limit=daily_actions_limit,
+                    sleep_on_flood_wait=sleep_on_flood_wait,
+                )
+            flood_until = (datetime.now() + timedelta(seconds=wait_seconds)).isoformat()
+            self.db.set_account_flood_until(self.account.phone, flood_until)
+            self.db.log_account_action(self.account.phone, "group", group, "flood_wait", f"FloodWait {wait_seconds}s")
+            log_event(module="sender", campaign="", account=self.account.phone, target=group,
+                      action="send_group", status="flood_wait", error=f"FloodWait {wait_seconds}s")
+            return f"flood_wait:{wait_seconds}"
+
+        except SlowModeWaitError as e:
+            wait = max(getattr(e, "seconds", 0) or 0, 1)
+            print(f"  [!] {group}: {human_reason('slow_mode', wait_seconds=wait)}")
+            self.db.log_account_action(self.account.phone, "group", group, "slow_mode", str(wait))
+            log_event(module="sender", campaign="", account=self.account.phone, target=group,
+                      action="send_group", status="slow_mode", error=str(wait))
+            return f"slow_mode:{wait}"
+
+        except PeerFloodError:
+            print(f"  [!] {self.account.phone}: {human_reason('banned', 'PeerFloodError')}")
+            self.db.deactivate_account(self.account.phone)
+            self.db.log_account_action(self.account.phone, "group", group, "banned", "PeerFloodError")
+            log_event(module="sender", campaign="", account=self.account.phone, target=group,
+                      action="send_group", status="banned", error="PeerFloodError")
+            return "banned"
+
+        except UserBannedInChannelError:
+            print(f"  [!] {group}: {human_reason('chat_banned', 'UserBannedInChannelError')}")
+            self.db.log_account_action(self.account.phone, "group", group, "chat_banned", "UserBannedInChannelError")
+            log_event(module="sender", campaign="", account=self.account.phone, target=group,
+                      action="send_group", status="chat_banned", error="UserBannedInChannelError")
+            return "chat_banned"
+
+        except ChatGuestSendForbiddenError as e:
+            print(f"  [!] {group}: {human_reason('need_subscription', str(e))}")
+            self.db.log_account_action(self.account.phone, "group", group, "need_subscription", str(e)[:200])
+            log_event(module="sender", campaign="", account=self.account.phone, target=group,
+                      action="send_group", status="need_subscription", error=str(e)[:200])
+            return "need_subscription"
+
+        except (ChatWriteForbiddenError, ChatAdminRequiredError):
+            print(f"  [!] {group}: {human_reason('no_permission')}")
+            self.db.log_account_action(self.account.phone, "group", group, "no_permission", "")
+            log_event(module="sender", campaign="", account=self.account.phone, target=group,
+                      action="send_group", status="no_permission", error="")
+            return "no_permission"
+
+        except ChannelPrivateError:
+            print(f"  [!] {group}: {human_reason('private')}")
+            self.db.log_account_action(self.account.phone, "group", group, "private", "")
+            log_event(module="sender", campaign="", account=self.account.phone, target=group,
+                      action="send_group", status="private", error="")
+            return "private"
+
+        except Exception as e:
+            print(f"  [-] {group}: {human_exception(e)}")
+            self.db.log_account_action(self.account.phone, "group", group, "error", str(e)[:200])
+            log_event(module="sender", campaign="", account=self.account.phone, target=group,
+                      action="send_group", status="error", error=str(e)[:200])
+            return "error"
+
     async def get_latest_message_id(self, chat: str) -> int:
         try:
             msgs = await self.client.get_messages(chat, limit=1)
@@ -713,26 +884,52 @@ class TelegramSender:
         alnum_count = sum(1 for ch in normalized if ch.isalnum())
         return alnum_count >= cls._SAVED_MESSAGE_MIN_ALNUM
 
-    async def get_saved_messages(self, limit: int = 30) -> list:
+    @classmethod
+    def _has_saved_message_rich_payload(cls, message) -> bool:
+        return bool(
+            getattr(message, "media", None)
+            or getattr(message, "entities", None)
+            or getattr(message, "reply_markup", None)
+        )
+
+    @classmethod
+    def _build_saved_message_template(cls, message) -> SavedMessageTemplate | None:
+        text = cls._extract_saved_message_text(message)
+        if text and cls._is_saved_message_template_text(text):
+            return SavedMessageTemplate(message=message, text=text)
+        if cls._has_saved_message_rich_payload(message):
+            return SavedMessageTemplate(message=message, text=text)
+        return None
+
+    async def get_saved_message_templates(self, limit: int = 30) -> list[SavedMessageTemplate]:
         try:
             messages = await self.client.get_messages("me", limit=limit)
-            texts = []
+            templates = []
             skipped = 0
             for m in messages or []:
-                t = self._extract_saved_message_text(m)
-                if not t:
+                template = self._build_saved_message_template(m)
+                if template is None or not template.is_usable:
                     skipped += 1
                     continue
-                if not self._is_saved_message_template_text(t):
-                    skipped += 1
-                    continue
-                texts.append(t)
-            if texts:
-                note = f", пропущено коротких/служебных: {skipped}" if skipped else ""
-                print(f"  [+] Избранное: {len(texts)} текстов ({self.account.phone}){note}")
+                templates.append(template)
+            if templates:
+                note = f", skipped short/service: {skipped}" if skipped else ""
+                rich_count = sum(1 for item in templates if item.is_rich)
+                print(
+                    f"  [+] Saved Messages: {len(templates)} templates "
+                    f"({rich_count} rich) ({self.account.phone}){note}"
+                )
             else:
-                print(f"  [!] Избранное пусто у {self.account.phone}")
-            return texts
+                print(f"  [!] Saved Messages is empty for {self.account.phone}")
+            return templates
+        except Exception as e:
+            print(f"  [-] Failed to read Saved Messages ({self.account.phone}): {e}")
+            return []
+
+    async def get_saved_messages(self, limit: int = 30) -> list:
+        try:
+            templates = await self.get_saved_message_templates(limit=limit)
+            return [item.text for item in templates if (item.text or "").strip()]
         except Exception as e:
             print(f"  [-] Ошибка получения Избранного ({self.account.phone}): {e}")
             return []

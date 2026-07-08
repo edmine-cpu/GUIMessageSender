@@ -9164,26 +9164,30 @@ class BroadcastFrame(ctk.CTkFrame):
                                     _bump_state(acc_phone=acc.phone)
                                     continue
 
+                                saved_template = None
                                 if message_source == "Избранное":
                                     saved = await _cycle_wait(
-                                        sender.get_saved_messages(limit=30),
+                                        sender.get_saved_message_templates(limit=30),
                                         f"{acc.phone}: чтение Избранного",
                                         25,
                                         acc.phone,
                                         link,
                                     )
-                                    saved_texts = [s for s in (saved or []) if (s or "").strip()]
+                                    saved_templates = [s for s in (saved or []) if getattr(s, "is_usable", False)]
+                                    saved_text_count = sum(1 for s in saved_templates if (getattr(s, "text", "") or "").strip())
+                                    saved_rich_count = sum(1 for s in saved_templates if getattr(s, "is_rich", False))
                                     log_queue.put((
                                         "cycle_log",
                                         f"[i] Кампания={running_campaign_name} | Аккаунт={acc.phone} | "
-                                        f"Источник=Избранное: {acc.phone}/Saved Messages | текстов={len(saved_texts)}",
+                                        f"Источник=Избранное: {acc.phone}/Saved Messages | шаблонов={len(saved_templates)} "
+                                        f"(текст={saved_text_count}, rich={saved_rich_count})",
                                     ))
-                                    if not saved_texts:
+                                    if not saved_templates:
                                         empty_saved_accounts.add(acc.phone)
                                         log_queue.put((
                                             "cycle_log",
-                                            f"[!] Кампания={running_campaign_name} | {acc.phone}: в Избранном нет текстовых сообщений. "
-                                            "Кампания не должна крутиться с пустым текстом.",
+                                            f"[!] Кампания={running_campaign_name} | {acc.phone}: в Избранном нет пригодных сообщений. "
+                                            "Кампания не должна крутиться с пустым шаблоном.",
                                         ))
                                         _cycle_error(acc.phone, link, "empty_saved_messages", "empty Saved Messages")
                                         if len(empty_saved_accounts) >= len(accounts):
@@ -9196,13 +9200,15 @@ class BroadcastFrame(ctk.CTkFrame):
                                         _bump_state(acc_phone=acc.phone)
                                         acc_pos += 1
                                         continue
-                                    raw = random.choice(saved_texts)
+                                    saved_template = random.choice(saved_templates)
+                                    raw = getattr(saved_template, "text", "") or ""
                                 elif message_source == "Шаблоны":
                                     raw = random.choice(templates_cache) if templates_cache else msg_text
                                 else:
                                     raw = msg_text
 
-                                if not (raw or "").strip():
+                                saved_is_rich = bool(saved_template is not None and getattr(saved_template, "is_rich", False))
+                                if not saved_is_rich and not (raw or "").strip():
                                     log_queue.put(("cycle_log",
                                                    f"[!] {link}: пустой текст. Заполни текст вручную/шаблоны "
                                                    f"или добавь текст в Избранное у {acc.phone}"))
@@ -9210,8 +9216,10 @@ class BroadcastFrame(ctk.CTkFrame):
                                     _bump_state(acc_phone=acc.phone)
                                     continue
 
-                                final_text = self._apply_unique(raw, unique_mode)
+                                final_text = raw if saved_is_rich else self._apply_unique(raw, unique_mode)
                                 preview50 = final_text.replace("\n", " ").strip()
+                                if saved_is_rich and not preview50:
+                                    preview50 = "[rich Saved Messages media]"
                                 if len(preview50) > 50:
                                     preview50 = preview50[:50] + "…"
                                 if message_source == "Избранное":
@@ -9230,19 +9238,31 @@ class BroadcastFrame(ctk.CTkFrame):
                                     raw_status = "dry_run"
                                     error_detail = ""
                                     preview = final_text.replace("\n", " ").strip()
+                                    if saved_is_rich and not preview:
+                                        preview = "[rich Saved Messages media]"
                                     if len(preview) > 120:
                                         preview = preview[:120] + "…"
                                     log_queue.put(("cycle_log", f"[DRY] {link} ← {acc.phone}: {preview}"))
                                     log_event(module="cycle", campaign=running_campaign_name, account=acc.phone, target=link,
                                               action="send", status="dry_run", error="")
                                 else:
-                                    raw_status = await _cycle_wait(
-                                        sender.send_broadcast_message(
+                                    send_coro = (
+                                        sender.send_saved_message(
+                                            link,
+                                            saved_template,
+                                            daily_actions_limit=daily_actions_limit,
+                                            sleep_on_flood_wait=False,
+                                        )
+                                        if saved_is_rich
+                                        else sender.send_broadcast_message(
                                             link,
                                             final_text,
                                             daily_actions_limit=daily_actions_limit,
                                             sleep_on_flood_wait=False,
-                                        ),
+                                        )
+                                    )
+                                    raw_status = await _cycle_wait(
+                                        send_coro,
                                         f"{link}: отправка",
                                         60,
                                         acc.phone,
@@ -10101,7 +10121,7 @@ class BroadcastFrame(ctk.CTkFrame):
 
                         mentioner = Mentioner(mentions_per_message=per_msg)
                         batches = [users[i:i + per_msg] for i in range(0, len(users), per_msg)]
-                        _saved_texts: dict = {}  # phone -> list[str] из Избранного
+                        _saved_templates: dict = {}  # phone -> SavedMessageTemplate list with text
 
                         print(f"Пользователей: {len(users)}, батчей: {len(batches)}, аккаунтов: {len(accounts)}")
                         mode = "DRY-RUN" if dry_run else "LIVE"
@@ -10183,23 +10203,37 @@ class BroadcastFrame(ctk.CTkFrame):
                                     )
                                     batch = batches[batch_idx]
                                 # Получить текст: из Избранного или вручную
+                                saved_template = None
                                 if _use_saved_m:
-                                    if acc.phone not in _saved_texts or not _saved_texts[acc.phone]:
+                                    if acc.phone not in _saved_templates or not _saved_templates[acc.phone]:
                                         saved = await _mention_wait(
-                                            sender.get_saved_messages(limit=30),
+                                            sender.get_saved_message_templates(limit=30),
                                             f"{acc.phone}: чтение Избранного",
                                             20,
                                             acc.phone,
                                             target,
                                         )
-                                        _saved_texts[acc.phone] = saved or []
-                                    raw = random.choice(_saved_texts[acc.phone]) if _saved_texts.get(acc.phone) else _base_message_m
+                                        _saved_templates[acc.phone] = [
+                                            s for s in (saved or []) if (getattr(s, "text", "") or "").strip()
+                                        ]
+                                    saved_template = (
+                                        random.choice(_saved_templates[acc.phone])
+                                        if _saved_templates.get(acc.phone)
+                                        else None
+                                    )
+                                    raw = getattr(saved_template, "text", "") if saved_template is not None else _base_message_m
                                 elif _use_templates_m:
                                     raw = random.choice(_templates_m) if _templates_m else _base_message_m
                                 else:
                                     raw = _base_message_m
-                                raw = self._apply_unique(raw, _unique_mode_m)
-                                text, entities = mentioner.build_mention_message(raw, batch)
+                                saved_is_rich = bool(saved_template is not None and getattr(saved_template, "is_rich", False))
+                                raw = raw if saved_is_rich else self._apply_unique(raw, _unique_mode_m)
+                                text, entities = mentioner.build_mention_message(
+                                    raw,
+                                    batch,
+                                    base_entities=getattr(saved_template, "entities", []) if saved_is_rich else None,
+                                    spin=not saved_is_rich,
+                                )
                                 if dry_run:
                                     preview = text.replace("\n", " ").strip()
                                     if len(preview) > 120:
@@ -11116,7 +11150,7 @@ class BroadcastFrame(ctk.CTkFrame):
                         mode = "DRY-RUN" if dry_run else "LIVE"
                         print(f"Аккаунтов: {len(accounts)}, задач: {len(tasks)}, режим: {mode}\n")
 
-                        _saved_texts_b: dict = {}  # phone -> list[str] из Избранного
+                        _saved_templates_b: dict = {}  # phone -> SavedMessageTemplate list from Saved Messages
                         stats = {"sent": 0, "dry_run": 0, "errors": 0}
                         current_account = "—"
                         current_target = "—"
@@ -11219,23 +11253,32 @@ class BroadcastFrame(ctk.CTkFrame):
                                         continue
 
                                     # Источник текста
+                                    saved_template = None
                                     if _b_source == "Избранное":
-                                        if acc.phone not in _saved_texts_b or not _saved_texts_b[acc.phone]:
+                                        if acc.phone not in _saved_templates_b or not _saved_templates_b[acc.phone]:
                                             saved = await _broadcast_wait(
-                                                sender.get_saved_messages(limit=30),
+                                                sender.get_saved_message_templates(limit=30),
                                                 f"{acc.phone}: чтение Избранного",
                                                 20,
                                                 acc.phone,
                                                 task.target_group,
                                             )
-                                            _saved_texts_b[acc.phone] = saved or []
-                                        raw_msg = random.choice(_saved_texts_b[acc.phone]) if _saved_texts_b.get(acc.phone) else task.message_text
+                                            _saved_templates_b[acc.phone] = [
+                                                s for s in (saved or []) if getattr(s, "is_usable", False)
+                                            ]
+                                        saved_template = (
+                                            random.choice(_saved_templates_b[acc.phone])
+                                            if _saved_templates_b.get(acc.phone)
+                                            else None
+                                        )
+                                        raw_msg = getattr(saved_template, "text", "") if saved_template is not None else task.message_text
                                     elif _b_source == "Шаблоны":
                                         templates = _split_message_template_variants(task.message_text)
                                         raw_msg = random.choice(templates) if templates else task.message_text
                                     else:
                                         raw_msg = task.message_text
-                                    if not (raw_msg or "").strip():
+                                    saved_is_rich = bool(saved_template is not None and getattr(saved_template, "is_rich", False))
+                                    if not saved_is_rich and not (raw_msg or "").strip():
                                         print(f"  [!] Задача #{task.id or '?'}: пустой текст — пропуск")
                                         stats["errors"] += 1
                                         put_progress(
@@ -11249,9 +11292,11 @@ class BroadcastFrame(ctk.CTkFrame):
                                         )
                                         continue
                                     # Уникализация
-                                    msg = self._apply_unique(raw_msg, _b_unique)
+                                    msg = raw_msg if saved_is_rich else self._apply_unique(raw_msg, _b_unique)
                                     if dry_run:
                                         preview = msg.replace("\n", " ").strip()
+                                        if saved_is_rich and not preview:
+                                            preview = "[rich Saved Messages media]"
                                         if len(preview) > 120:
                                             preview = preview[:120] + "…"
                                         print(f"  [DRY] {task.target_group} <- {acc.phone}: {preview}")
@@ -11259,8 +11304,13 @@ class BroadcastFrame(ctk.CTkFrame):
                                         status = "dry_run"
                                         error_detail = ""
                                     else:
+                                        send_coro = (
+                                            sender.send_saved_message(task.target_group, saved_template)
+                                            if saved_is_rich
+                                            else sender.send_broadcast_message(task.target_group, msg)
+                                        )
                                         raw_status = await _broadcast_wait(
-                                            sender.send_broadcast_message(task.target_group, msg),
+                                            send_coro,
                                             f"{task.target_group}: отправка",
                                             45,
                                             acc.phone,

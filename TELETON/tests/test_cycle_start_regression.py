@@ -220,7 +220,9 @@ def test_cycle_saved_messages_are_read_fresh_and_logged_before_send():
     methods = _find_class_methods(src, "BroadcastFrame")
     start = methods.get("_start_cycle", "")
     assert "saved_cache" not in start
-    assert "sender.get_saved_messages(limit=30)" in start
+    assert "sender.get_saved_message_templates(limit=30)" in start
+    assert "sender.send_saved_message(" in start
+    assert "saved_is_rich" in start
     assert "Источник=Избранное" in start
     assert "Перед отправкой | campaign=" in start
     assert "preview50" in start

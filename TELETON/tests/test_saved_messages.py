@@ -2,14 +2,19 @@ from types import SimpleNamespace
 
 import pytest
 
+import sender as sender_module
+from models import Account
 from sender import TelegramSender
 
 
 class FakeSavedMessage:
-    def __init__(self, raw_text=None, message=None, text=None):
+    def __init__(self, raw_text=None, message=None, text=None, entities=None, media=None, reply_markup=None):
         self.raw_text = raw_text
         self.message = message
         self.text = text
+        self.entities = entities
+        self.media = media
+        self.reply_markup = reply_markup
 
 
 class FakeSavedClient:
@@ -61,3 +66,75 @@ def test_saved_message_template_filter_rejects_punctuation_only_text():
     assert TelegramSender._is_saved_message_template_text("OK")
     assert TelegramSender._is_saved_message_template_text("https://t.me/example")
     assert TelegramSender._is_saved_message_template_text("Price 90000")
+
+
+@pytest.mark.asyncio
+async def test_get_saved_message_templates_preserves_rich_payloads():
+    entities = [SimpleNamespace(kind="text_url")]
+    reply_markup = SimpleNamespace(buttons=["tap"])
+    rich = FakeSavedMessage(raw_text="Tap here", text="**Tap here**", entities=entities, reply_markup=reply_markup)
+    media_only = FakeSavedMessage(raw_text="", media=SimpleNamespace(kind="premium_sticker"))
+    sender = make_sender([
+        FakeSavedMessage(raw_text="."),
+        rich,
+        media_only,
+    ])
+
+    templates = await sender.get_saved_message_templates(limit=30)
+
+    assert len(templates) == 2
+    assert templates[0].message is rich
+    assert templates[0].text == "Tap here"
+    assert templates[0].entities == entities
+    assert templates[0].reply_markup is reply_markup
+    assert templates[0].is_rich
+    assert templates[1].message is media_only
+    assert templates[1].text == ""
+    assert templates[1].media is media_only.media
+    assert templates[1].is_usable
+
+
+class FakeSendClient:
+    def __init__(self):
+        self.calls = []
+
+    async def send_message(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        return SimpleNamespace(id=123)
+
+
+class FakeDB:
+    def __init__(self):
+        self.actions = []
+
+    def try_acquire_action_slot(self, *args, **kwargs):
+        return True, "ok", 0.0
+
+    def log_account_action(self, *args):
+        self.actions.append(args)
+
+
+@pytest.mark.asyncio
+async def test_send_saved_message_uses_original_message_object(monkeypatch):
+    fake_client = FakeSendClient()
+    fake_db = FakeDB()
+    sender = TelegramSender.__new__(TelegramSender)
+    sender.account = Account(phone="+15550000001", session_name="session_test")
+    sender.db = fake_db
+    sender.client = fake_client
+    sender.sent_count = 0
+    events = []
+    monkeypatch.setattr(sender_module, "log_event", lambda **kwargs: events.append(kwargs))
+    original = FakeSavedMessage(
+        raw_text="Tap here",
+        entities=[SimpleNamespace(kind="custom_emoji")],
+        reply_markup=SimpleNamespace(buttons=["tap"]),
+    )
+    template = TelegramSender._build_saved_message_template(original)
+
+    result = await sender.send_saved_message("@target", template)
+
+    assert result == "sent:123"
+    assert fake_client.calls == [(("@target", original), {})]
+    assert fake_db.actions == [("+15550000001", "group", "@target", "sent", "123")]
+    assert events and events[0]["status"] == "sent"

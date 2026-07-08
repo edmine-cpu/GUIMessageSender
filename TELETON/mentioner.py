@@ -10,7 +10,11 @@ class Mentioner:
         self.mentions_per_message = mentions_per_message
 
     def build_mention_message(
-        self, message_template: str, users: List[ParsedUser]
+        self,
+        message_template: str,
+        users: List[ParsedUser],
+        base_entities: list | None = None,
+        spin: bool = True,
     ) -> Tuple[str, list]:
         """
         Формирование сообщения с inline-упоминаниями.
@@ -24,9 +28,9 @@ class Mentioner:
         - Если username нет → используем InputMessageEntityMentionName по user_id
           (требует access_hash, который должен быть в session-кэше).
         """
-        text = spin_text(message_template)
+        text = spin_text(message_template) if spin else (message_template or "")
         text += "\n"
-        entities = []
+        entities = list(base_entities or [])
 
         for user in users:
             if user.username:
