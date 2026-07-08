@@ -1,6 +1,7 @@
 import asyncio
 import threading
 import sys
+import re
 from urllib.parse import urlparse
 from datetime import datetime, timedelta
 
@@ -58,6 +59,7 @@ class TelegramSender:
     _account_locks: dict[str, threading.Lock] = {}
     _CONNECT_TIMEOUT_SECONDS = 30.0
     _SEND_TIMEOUT_SECONDS = 30.0
+    _SAVED_MESSAGE_MIN_ALNUM = 2
 
     @classmethod
     def _get_account_lock(cls, phone: str) -> threading.Lock:
@@ -683,30 +685,51 @@ class TelegramSender:
 
     async def get_saved_message(self) -> str:
         """Получить последнее сообщение из Избранного (Saved Messages)."""
-        try:
-            messages = await self.client.get_messages("me", limit=1)
-            if messages and messages[0].text:
-                print(f"  [+] Текст из Избранного ({self.account.phone}): {messages[0].text[:60]}...")
-                return messages[0].text
-            print(f"  [!] Избранное пусто у {self.account.phone}")
-            return ""
-        except Exception as e:
-            print(f"  [-] Ошибка получения Избранного ({self.account.phone}): {e}")
-            return ""
+        messages = await self.get_saved_messages(limit=30)
+        if messages:
+            return messages[0]
+        return ""
+
+    @classmethod
+    def _extract_saved_message_text(cls, message) -> str:
+        for attr in ("raw_text", "message", "text"):
+            value = getattr(message, attr, None)
+            if callable(value):
+                try:
+                    value = value()
+                except Exception:
+                    value = None
+            if isinstance(value, str):
+                text = value.strip()
+                if text:
+                    return text
+        return ""
+
+    @classmethod
+    def _is_saved_message_template_text(cls, text: str) -> bool:
+        normalized = re.sub(r"\s+", " ", text or "").strip()
+        if not normalized:
+            return False
+        alnum_count = sum(1 for ch in normalized if ch.isalnum())
+        return alnum_count >= cls._SAVED_MESSAGE_MIN_ALNUM
 
     async def get_saved_messages(self, limit: int = 30) -> list:
         try:
             messages = await self.client.get_messages("me", limit=limit)
             texts = []
+            skipped = 0
             for m in messages or []:
-                t = getattr(m, "text", None)
+                t = self._extract_saved_message_text(m)
                 if not t:
+                    skipped += 1
                     continue
-                t = t.strip()
-                if t:
-                    texts.append(t)
+                if not self._is_saved_message_template_text(t):
+                    skipped += 1
+                    continue
+                texts.append(t)
             if texts:
-                print(f"  [+] Избранное: {len(texts)} текстов ({self.account.phone})")
+                note = f", пропущено коротких/служебных: {skipped}" if skipped else ""
+                print(f"  [+] Избранное: {len(texts)} текстов ({self.account.phone}){note}")
             else:
                 print(f"  [!] Избранное пусто у {self.account.phone}")
             return texts
