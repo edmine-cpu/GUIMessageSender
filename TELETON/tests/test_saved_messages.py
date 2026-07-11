@@ -2,6 +2,13 @@ from types import SimpleNamespace
 
 import pytest
 from telethon.errors import ChatForwardsRestrictedError
+from telethon.tl.types import (
+    KeyboardButtonRow,
+    KeyboardButtonUrl,
+    MessageEntityCustomEmoji,
+    MessageEntityTextUrl,
+    ReplyInlineMarkup,
+)
 
 import sender as sender_module
 from models import Account
@@ -94,6 +101,26 @@ async def test_get_saved_message_templates_preserves_rich_payloads():
     assert templates[1].text == ""
     assert templates[1].media is media_only.media
     assert templates[1].is_usable
+
+
+def test_saved_message_template_accepts_real_telegram_rich_types():
+    entities = [
+        MessageEntityTextUrl(offset=0, length=4, url="https://t.me/example"),
+        MessageEntityCustomEmoji(offset=5, length=2, document_id=123456789),
+    ]
+    markup = ReplyInlineMarkup(rows=[
+        KeyboardButtonRow(buttons=[
+            KeyboardButtonUrl(text="Tap", url="https://t.me/example"),
+        ]),
+    ])
+    original = FakeSavedMessage(raw_text="Tap 😀", entities=entities, reply_markup=markup)
+
+    template = TelegramSender._build_saved_message_template(original)
+
+    assert template is not None
+    assert template.is_rich
+    assert template.entities == entities
+    assert template.reply_markup is markup
 
 
 class FakeSendClient:
