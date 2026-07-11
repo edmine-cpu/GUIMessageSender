@@ -23,6 +23,8 @@ from telethon.errors import (
     ChatAdminRequiredError,
     ChannelPrivateError,
     UserPrivacyRestrictedError,
+    ChatForwardsRestrictedError,
+    MessageAuthorRequiredError,
     # Auth-специфичные — для классификации в connect()
     AuthKeyUnregisteredError,
     AuthKeyInvalidError,
@@ -753,12 +755,35 @@ class TelegramSender:
             return "error"
 
         try:
-            msg = await asyncio.wait_for(
-                self.client.send_message(group, source_message),
-                timeout=self._SEND_TIMEOUT_SECONDS,
+            use_native_forward = bool(
+                isinstance(saved_message, SavedMessageTemplate)
+                and saved_message.is_rich
+                and getattr(source_message, "id", None)
             )
+            try:
+                if use_native_forward:
+                    msg = await asyncio.wait_for(
+                        self.client.forward_messages(group, source_message, drop_author=True),
+                        timeout=self._SEND_TIMEOUT_SECONDS,
+                    )
+                else:
+                    msg = await asyncio.wait_for(
+                        self.client.send_message(group, source_message),
+                        timeout=self._SEND_TIMEOUT_SECONDS,
+                    )
+            except (ChatForwardsRestrictedError, MessageAuthorRequiredError) as forward_error:
+                if not use_native_forward:
+                    raise
+                print(
+                    f"  [!] Saved Messages native forward failed ({type(forward_error).__name__}); "
+                    "falling back to degraded message copy, rich markup may be lost"
+                )
+                msg = await asyncio.wait_for(
+                    self.client.send_message(group, source_message),
+                    timeout=self._SEND_TIMEOUT_SECONDS,
+                )
             self.sent_count += 1
-            print(f"  [+] Sent Saved Messages copy to {group} ({self.account.phone})")
+            print(f"  [+] Sent Saved Messages template to {group} ({self.account.phone})")
             msg_id = int(getattr(msg, "id", 0) or 0)
             self.db.log_account_action(self.account.phone, "group", group, "sent", str(msg_id) if msg_id else "")
             log_event(module="sender", campaign="", account=self.account.phone, target=group,

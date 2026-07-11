@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import pytest
+from telethon.errors import ChatForwardsRestrictedError
 
 import sender as sender_module
 from models import Account
@@ -9,6 +10,7 @@ from sender import TelegramSender
 
 class FakeSavedMessage:
     def __init__(self, raw_text=None, message=None, text=None, entities=None, media=None, reply_markup=None):
+        self.id = None
         self.raw_text = raw_text
         self.message = message
         self.text = text
@@ -95,12 +97,19 @@ async def test_get_saved_message_templates_preserves_rich_payloads():
 
 
 class FakeSendClient:
-    def __init__(self):
+    def __init__(self, fail_forward=None):
         self.calls = []
+        self.fail_forward = fail_forward
 
     async def send_message(self, *args, **kwargs):
         self.calls.append((args, kwargs))
         return SimpleNamespace(id=123)
+
+    async def forward_messages(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        if self.fail_forward:
+            raise self.fail_forward
+        return SimpleNamespace(id=456)
 
 
 class FakeDB:
@@ -136,5 +145,62 @@ async def test_send_saved_message_uses_original_message_object(monkeypatch):
 
     assert result == "sent:123"
     assert fake_client.calls == [(("@target", original), {})]
+    assert fake_db.actions == [("+15550000001", "group", "@target", "sent", "123")]
+    assert events and events[0]["status"] == "sent"
+
+
+@pytest.mark.asyncio
+async def test_send_saved_message_forwards_rich_message_with_hidden_author(monkeypatch):
+    fake_client = FakeSendClient()
+    fake_db = FakeDB()
+    sender = TelegramSender.__new__(TelegramSender)
+    sender.account = Account(phone="+15550000001", session_name="session_test")
+    sender.db = fake_db
+    sender.client = fake_client
+    sender.sent_count = 0
+    events = []
+    monkeypatch.setattr(sender_module, "log_event", lambda **kwargs: events.append(kwargs))
+    original = FakeSavedMessage(
+        raw_text="Tap here",
+        entities=[SimpleNamespace(kind="custom_emoji")],
+        reply_markup=SimpleNamespace(buttons=["tap"]),
+    )
+    original.id = 777
+    template = TelegramSender._build_saved_message_template(original)
+
+    result = await sender.send_saved_message("@target", template)
+
+    assert result == "sent:456"
+    assert fake_client.calls == [(("@target", original), {"drop_author": True})]
+    assert fake_db.actions == [("+15550000001", "group", "@target", "sent", "456")]
+    assert events and events[0]["status"] == "sent"
+
+
+@pytest.mark.asyncio
+async def test_send_saved_message_falls_back_to_copy_when_forward_restricted(monkeypatch):
+    fake_client = FakeSendClient(fail_forward=ChatForwardsRestrictedError(request=None))
+    fake_db = FakeDB()
+    sender = TelegramSender.__new__(TelegramSender)
+    sender.account = Account(phone="+15550000001", session_name="session_test")
+    sender.db = fake_db
+    sender.client = fake_client
+    sender.sent_count = 0
+    events = []
+    monkeypatch.setattr(sender_module, "log_event", lambda **kwargs: events.append(kwargs))
+    original = FakeSavedMessage(
+        raw_text="Tap here",
+        entities=[SimpleNamespace(kind="custom_emoji")],
+        reply_markup=SimpleNamespace(buttons=["tap"]),
+    )
+    original.id = 777
+    template = TelegramSender._build_saved_message_template(original)
+
+    result = await sender.send_saved_message("@target", template)
+
+    assert result == "sent:123"
+    assert fake_client.calls == [
+        (("@target", original), {"drop_author": True}),
+        (("@target", original), {}),
+    ]
     assert fake_db.actions == [("+15550000001", "group", "@target", "sent", "123")]
     assert events and events[0]["status"] == "sent"
